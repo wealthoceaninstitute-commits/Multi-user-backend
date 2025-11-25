@@ -1553,7 +1553,7 @@ def route_place_orders(
 
     def _index_clients() -> Dict[str, Dict[str, Any]]:
         idx: Dict[str, Dict[str, Any]] = {}
-               for brk, folder in (("dhan", DHAN_DIR_LOCAL), ("motilal", MO_DIR_LOCAL)):
+        for brk, folder in (("dhan", DHAN_DIR_LOCAL), ("motilal", MO_DIR_LOCAL)):
             try:
                 for fn in os.listdir(folder):
                     if not fn.endswith(".json"):
@@ -2071,28 +2071,6 @@ def route_modify_order(payload: Dict[str, Any] = Body(...)):
 if __name__ == "__main__":
     import uvicorn
     uvicorn.run("MultiBroker_Router:app", host="127.0.0.1", port=5001, reload=False)
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
 
 
 
