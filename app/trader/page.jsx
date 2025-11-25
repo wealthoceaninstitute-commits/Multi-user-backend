@@ -1,8 +1,10 @@
 'use client';
 
-import { useState } from 'react';
-import { Container, Tabs, Tab } from 'react-bootstrap';
+import { useState, useEffect } from 'react';
+import { useRouter } from 'next/navigation';
+import { Container, Tabs, Tab, Button } from 'react-bootstrap';
 import dynamic from 'next/dynamic';
+import { getCurrentUser, clearCurrentUser } from '../../src/lib/userSession';
 
 // Code-split tabs (faster initial load)
 const TradeForm   = dynamic(() => import('../../components/TradeForm'),   { ssr: false });
@@ -15,10 +17,42 @@ const CopyTrading = dynamic(() => import('../../components/CopyTrading'), { ssr:
 
 export default function TraderPage() {
   const [key, setKey] = useState('trade');
+  const [user, setUser] = useState(null);
+  const router = useRouter();
+
+  useEffect(() => {
+    const u = getCurrentUser();
+    if (!u) {
+      // No user -> go back to login
+      router.replace('/');
+    } else {
+      setUser(u);
+    }
+  }, [router]);
+
+  const handleLogout = () => {
+    clearCurrentUser();
+    router.replace('/');
+  };
+
+  // While checking user / redirecting, avoid flicker
+  if (!user) {
+    return null;
+  }
 
   return (
     <Container className="py-3">
-      <h2 className="mb-3 text-center">Wealth Ocean – Multi-Broker Trader</h2>
+      <div className="d-flex justify-content-between align-items-center mb-3">
+        <h2 className="mb-0">Wealth Ocean – Multi-Broker Trader</h2>
+        <div className="d-flex align-items-center gap-2">
+          <span className="text-muted small">
+            Logged in as <strong>{user}</strong>
+          </span>
+          <Button size="sm" variant="outline-secondary" onClick={handleLogout}>
+            Logout
+          </Button>
+        </div>
+      </div>
 
       <Tabs
         id="trader-main-tabs"
