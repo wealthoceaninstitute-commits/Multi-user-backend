@@ -1,28 +1,20 @@
 # MultiBroker_Router.py
-# MultiBroker_Router.py
 import os, json, importlib, base64
-from typing import Any, Dict, List, Optional
-
-from fastapi import (
-    FastAPI,
-    Body,
-    BackgroundTasks,
-    HTTPException,
-    Depends,
-    Header,
-    Query,
-)
+from typing import Any, Dict, List,Optional
+from fastapi import FastAPI, Body, BackgroundTasks, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from collections import OrderedDict
-import time
+import importlib, os, time
 import threading
-import sqlite3
-import requests
+import os, sqlite3, threading, requests
+from fastapi import Query
 import pandas as pd
-import hashlib, secrets
-from datetime import datetime, timedelta
-from backend.user.auth import signup_user, login_user, get_current_user
-
+from backend.user.storage import (
+    register_user_service,
+    _hash_password,
+    _create_session,
+    _user_json_path
+)
 
 
 
@@ -30,7 +22,7 @@ STAT_KEYS = ["pending", "traded", "rejected", "cancelled", "others"]
 summary_data_global: Dict[str, Dict[str, Any]] = {}
 SYMBOL_DB_PATH = os.path.join(os.path.abspath(os.environ.get("DATA_DIR", "./data")), "symbols.db")
 SYMBOL_TABLE   = "symbols"
-SYMBOL_CSV_URL = "https://raw.githubusercontent.com/Pramod541988/Stock_List/main/security_id.csv"
+SYMBOL_CSV_URL = "https://raw.githubusercontent.com/Pramod541988/Stock_List/refs/heads/main/security_id.csv"
 _symbol_db_lock = threading.Lock()
 
 
@@ -54,200 +46,26 @@ def GH_CONTENTS_URL(rel_path: str) -> str:
 
 
 
-# -------- Base storage (global) --------
+# -------- Option B storage --------
 BASE_DIR = os.path.abspath(os.environ.get("DATA_DIR", "./data"))
-
-# Old single-user layout (kept for backward compatibility)
 CLIENTS_ROOT = os.path.join(BASE_DIR, "clients")
 DHAN_DIR     = os.path.join(CLIENTS_ROOT, "dhan")
 MO_DIR       = os.path.join(CLIENTS_ROOT, "motilal")
 os.makedirs(DHAN_DIR, exist_ok=True)
 os.makedirs(MO_DIR,   exist_ok=True)
 
-# NEW: multi-user layout
-USERS_ROOT = os.path.join(BASE_DIR, "users")
-os.makedirs(USERS_ROOT, exist_ok=True)
-
-# Basic auth + session config
-PASSWORD_SALT        = os.getenv("USER_PASSWORD_SALT", "woi_default_salt_01")
-SESSION_TTL_MINUTES  = int(os.getenv("USER_SESSION_TTL_MIN", "720"))  # default 12h
-_user_sessions: Dict[str, Dict[str, Any]] = {}  # token -> {username, expires_at}
-
-
-def _hash_password(raw: str) -> str:
-    raw = (raw or "").strip()
-    return hashlib.sha256((raw + PASSWORD_SALT).encode("utf-8")).hexdigest()
-
-
-def _user_key(username: str) -> str:
-    """Safe folder name for user."""
-    s = (username or "").strip()
-    return "".join(ch for ch in s if ch.isalnum() or ch in ("_", "-")) or "user"
-
-
-def _user_root(username: str) -> str:
-    return os.path.join(USERS_ROOT, _user_key(username))
-
-
-def _user_profile_path(username: str) -> str:
-    return os.path.join(_user_root(username), "user.json")
-
-
-def _ensure_user_tree(username: str) -> str:
-    """
-    Ensure per-user folder structure exists:
-
-    /data/users/{user}/
-        user.json
-        clients/dhan/
-        clients/motilal/
-        groups/
-        copy_setups/
-    """
-    root = _user_root(username)
-    os.makedirs(root, exist_ok=True)
-    os.makedirs(os.path.join(root, "clients", "dhan"), exist_ok=True)
-    os.makedirs(os.path.join(root, "clients", "motilal"), exist_ok=True)
-    os.makedirs(os.path.join(root, "groups"), exist_ok=True)
-    os.makedirs(os.path.join(root, "copy_setups"), exist_ok=True)
-    return root
-
-
-def _user_clients_dir(username: str, broker: str) -> str:
-    root = _ensure_user_tree(username)
-    sub  = "dhan" if broker == "dhan" else "motilal"
-    return os.path.join(root, "clients", sub)
-
-
-def _create_session(username: str) -> str:
-    token = secrets.token_urlsafe(32)
-    expires = datetime.utcnow() + timedelta(minutes=SESSION_TTL_MINUTES)
-    _user_sessions[token] = {"username": username, "expires_at": expires}
-    return token
-
-
-def _get_user_by_token(token: str) -> str:
-    sess = _user_sessions.get(token)
-    if not sess:
-        raise HTTPException(status_code=401, detail="Invalid session token")
-
-    if datetime.utcnow() > sess["expires_at"]:
-        _user_sessions.pop(token, None)
-        raise HTTPException(status_code=401, detail="Session expired, please login again")
-
-    return sess["username"]
-
-
-def get_current_user(
-    x_auth_token: Optional[str] = Header(None, alias="X-Auth-Token")
-) -> Optional[str]:
-    """
-    Dependency used by routes.
-    - If header missing -> returns None (falls back to global single-user data).
-    - If present -> validates and returns username or raises 401.
-    """
-    if not x_auth_token:
-        return None
-    return _get_user_by_token(x_auth_token)
-
-
 app = FastAPI(title="Multi-broker Router")
 app.add_middleware(
     CORSMiddleware,
     allow_origins=[
-        "https://multibrokertrader-multiuser.up.railway.app",
         "https://multibrokertrader-production.up.railway.app",
         "https://multibroker-trader.onrender.com",
-        "https://multibrokertrader-production-b4e2.up.railway.app",
-        "https://multibrokertradermultiuser-production-f735.up.railway.app",
+        "https://multibrokertrader-production-b4e2.up.railway.app"
     ],
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
 )
-
-# =========================
-#  User Management (multi-user)
-# =========================
-
-@app.post("/users/register")
-def register_user(payload: Dict[str, Any] = Body(...)):
-    """
-    Create a new application user.
-
-    Expected JSON:
-    {
-      "username": "dealer1",
-      "password": "secret",
-      "email": "optional@mail.com"
-    }
-    """
-    username = (payload.get("username") or "").strip()
-    password = (payload.get("password") or "").strip()
-    email    = (payload.get("email") or "").strip()
-
-    if not username or not password:
-        raise HTTPException(status_code=400, detail="username and password are required")
-
-    prof_path = _user_profile_path(username)
-    if os.path.exists(prof_path):
-        raise HTTPException(status_code=400, detail="User already exists")
-
-    # Create folder structure
-    _ensure_user_tree(username)
-
-    doc = {
-        "username": username,
-        "email": email,
-        "password_hash": _hash_password(password),
-        "created_at": datetime.utcnow().isoformat() + "Z",
-    }
-
-    with open(prof_path, "w", encoding="utf-8") as f:
-        json.dump(doc, f, indent=2)
-
-    token = _create_session(username)
-    return {"success": True, "username": username, "token": token}
-
-
-@app.post("/users/login")
-def login_user(payload: Dict[str, Any] = Body(...)):
-    """
-    Login existing user.
-
-    Expected JSON:
-    {
-      "username": "dealer1",
-      "password": "secret"
-    }
-    """
-    username = (payload.get("username") or "").strip()
-    password = (payload.get("password") or "").strip()
-
-    if not username or not password:
-        raise HTTPException(status_code=400, detail="username and password are required")
-
-    prof_path = _user_profile_path(username)
-    if not os.path.exists(prof_path):
-        raise HTTPException(status_code=400, detail="User not found")
-
-    with open(prof_path, "r", encoding="utf-8") as f:
-        doc = json.load(f)
-
-    expected_hash = doc.get("password_hash") or ""
-    if _hash_password(password) != expected_hash:
-        raise HTTPException(status_code=400, detail="Invalid password")
-
-    token = _create_session(username)
-    return {"success": True, "username": username, "token": token}
-
-
-@app.get("/users/me")
-def users_me(current_user: Optional[str] = Depends(get_current_user)):
-    """Debug helper – returns current logged-in user (requires X-Auth-Token)."""
-    if not current_user:
-        raise HTTPException(status_code=401, detail="Not authenticated")
-    return {"username": current_user}
 
 
 # --- Groups storage (simple) ---
@@ -271,7 +89,6 @@ def _read_json(path: str) -> Dict[str, Any]:
             return json.load(f)
     except Exception:
         return {}
-
 
 
 
@@ -398,6 +215,29 @@ def _github_file_delete(rel_path: str) -> None:
         requests.delete(url, headers=GH_HEADERS(), json=payload, timeout=20)
     except Exception:
         pass
+
+def create_new_user(username: str, password: str, email: str = ""):
+    if not username or not password:
+        raise HTTPException(400, "Username and password are required")
+
+    # Check if already exists
+    if os.path.exists(_user_json_path(username)):
+        raise HTTPException(400, "User already exists")
+
+    # Call the service that handles local + GitHub creation
+    user_doc = register_user_service(username, password, email)
+
+    # Create login token
+    token = _create_session(username)
+
+    return {
+        "success": True,
+        "message": "User created successfully",
+        "username": username,
+        "token": token,
+        "user": user_doc,
+    }
+
 
 
 def refresh_symbol_db_from_github() -> str:
@@ -535,21 +375,11 @@ def _pick(*vals) -> str:
         if s: return s
     return ""
 
-def _folder_for(broker: str, username: Optional[str] = None) -> str:
-    """
-    If username is provided, use that user's clients folder.
-    Otherwise, fall back to global single-user folders (DHAN_DIR / MO_DIR).
-    """
-    broker = (broker or "").lower()
-    if username:
-        return _user_clients_dir(username, broker)
+def _folder_for(broker: str) -> str:
     return DHAN_DIR if broker == "dhan" else MO_DIR
 
-
-def _path_for(broker: str, userid: str, username: Optional[str] = None) -> str:
-    return os.path.join(_folder_for(broker, username), f"{_safe(userid)}.json")
-
-
+def _path_for(broker: str, userid: str) -> str:
+    return os.path.join(_folder_for(broker), f"{_safe(userid)}.json")
 
 def _load(path: str) -> Dict[str, Any]:
     with open(path, "r") as f: return json.load(f)
@@ -574,8 +404,7 @@ def _save(path: str, data: Dict[str, Any]):
         pass
 
 # ---------- minimal save (no hard failures) ----------
-# ---------- minimal save (no hard failures) ----------
-def _save_minimal(broker: str, payload: Dict[str, Any], username: Optional[str] = None) -> str:
+def _save_minimal(broker: str, payload: Dict[str, Any]) -> str:
     """
     Save ONLY modal fields + session_active.
     motilal: name, userid, password, pan, apikey, totpkey, capital, session_active
@@ -600,11 +429,14 @@ def _save_minimal(broker: str, payload: Dict[str, Any], username: Optional[str] 
             "name": name,
             "userid": userid,
             "password": _pick(payload.get("password"), creds.get("password")),
+            # ← NEW: accept pan from multiple places / casings
             "pan": _pick(payload.get("pan"), creds.get("pan"), creds.get("PAN")),
+            # ← NEW: accept apikey from multiple places / casings
             "apikey": _pick(
                 payload.get("apikey"),
                 creds.get("apikey"), creds.get("api_key"), creds.get("apiKey")
             ),
+            # already worked via creds.mpin, keep plus more fallbacks
             "totpkey": _pick(
                 payload.get("totpkey"),
                 creds.get("totpkey"), creds.get("mpin"), creds.get("otp")
@@ -613,12 +445,11 @@ def _save_minimal(broker: str, payload: Dict[str, Any], username: Optional[str] 
             "session_active": bool(payload.get("session_active", False)),
         }
 
-    path = _path_for(broker, userid, username)
+    path = _path_for(broker, userid)
     _save(path, doc)
     return path
 
-
-def _update_minimal(broker: str, payload: Dict[str, Any], username: Optional[str] = None) -> str:
+def _update_minimal(broker: str, payload: Dict[str, Any]) -> str:
     """
     Update ONLY modal fields + session_active.
     - Preserves existing non-empty values when new values are empty/missing.
@@ -626,16 +457,19 @@ def _update_minimal(broker: str, payload: Dict[str, Any], username: Optional[str
     Optional fields for rename:
       original_userid, original_broker
     """
+    # Where the record *was* (if provided)
     old_userid  = _pick(payload.get("original_userid"), payload.get("old_userid"))
     old_broker  = (_pick(payload.get("original_broker"), payload.get("old_broker")) or broker).lower()
-    old_path    = _path_for(old_broker, old_userid, username) if old_userid else None
+    old_path    = _path_for(old_broker, old_userid) if old_userid else None
 
+    # Where the record *should be* after edit
     userid      = _pick(payload.get("userid"), payload.get("client_id"), old_userid)
     if not userid:
         raise HTTPException(status_code=400, detail="client_id / userid is required for edit")
     name        = _pick(payload.get("name"), payload.get("display_name"), userid)
-    new_path    = _path_for(broker, userid, username)
+    new_path    = _path_for(broker, userid)
 
+    # Load what we already have (prefer old if exists, otherwise new)
     existing: Dict[str, Any] = {}
     try:
         if old_path and os.path.exists(old_path):
@@ -645,6 +479,7 @@ def _update_minimal(broker: str, payload: Dict[str, Any], username: Optional[str
     except Exception:
         existing = {}
 
+    # Build merged doc (keep existing field when new candidate is empty)
     if broker == "dhan":
         doc = {
             "name":           _pick(name, existing.get("name")),
@@ -670,8 +505,10 @@ def _update_minimal(broker: str, payload: Dict[str, Any], username: Optional[str
             "session_active": bool(payload.get("session_active", existing.get("session_active", False))),
         }
 
+    # Write new file
     _save(new_path, doc)
 
+    # If we changed userid/broker, remove the old file
     if old_path and os.path.abspath(old_path) != os.path.abspath(new_path):
         try:
             if os.path.exists(old_path):
@@ -682,14 +519,71 @@ def _update_minimal(broker: str, payload: Dict[str, Any], username: Optional[str
     return new_path
 
 
-def _delete_client_file(broker: str, userid: str, username: Optional[str] = None) -> bool:
+def _has_required_for_login(broker: str, c: Dict[str, Any]) -> bool:
+    if broker == "dhan":
+        return bool((c.get("apikey") or "").strip())
+    return all((
+        (c.get("password") or "").strip(),
+        (c.get("pan") or "").strip(),
+        (c.get("apikey") or "").strip(),
+        (c.get("totpkey") or "").strip()
+    ))
+
+def _dispatch_login(broker: str, path: str):
+    try:
+        client = _load(path)
+
+        if not _has_required_for_login(broker, client):
+            print(f"[router] skip login ({broker}/{client.get('userid')}): missing fields")
+            return
+
+        mod_name = "Broker_dhan" if broker == "dhan" else "Broker_motilal"
+        mod = importlib.import_module(mod_name)
+        login_fn = getattr(mod, "login", None)
+        if not callable(login_fn):
+            print(f"[router] {mod_name}.login() not found")
+            return
+
+        result = login_fn(client)
+
+        # NEW: handle dict returned by upgraded Dhan login
+        ok = bool(result if not isinstance(result, dict) else result.get("ok", True))
+
+        if isinstance(result, dict):
+            # persist token info so UI/endpoints can show it
+            if result.get("token_validity_raw") or result.get("token_validity_iso"):
+                client["token_validity"] = result.get("token_validity_raw") or result.get("token_validity_iso")
+                client["token_validity_iso"] = result.get("token_validity_iso", "")
+            if result.get("token_days_left") is not None:
+                client["token_days_left"] = int(result["token_days_left"])
+            if result.get("token_warning") is not None:
+                client["token_warning"] = bool(result["token_warning"])
+            # optional: last checked timestamp
+            from datetime import datetime
+            client["last_token_check"] = datetime.utcnow().isoformat() + "Z"
+
+            # Log the warning text once at login time
+            if result.get("message"):
+                print(f"[router] {result['message']}")
+
+        client["session_active"] = ok
+        _save(path, client)
+
+    except ModuleNotFoundError:
+        print(f"[router] module for {broker} not found (Broker_dhan.py / Broker_motilal.py); saved only")
+    except Exception as e:
+        print(f"[router] login error ({broker}): {e}")
+
+
+def _delete_client_file(broker: str, userid: str) -> bool:
     """Remove a single client's JSON file. Returns True if deleted, False if it didn't exist."""
     broker = (broker or "").lower()
     if not broker or not userid:
         raise HTTPException(status_code=400, detail="broker and userid are required")
-    path = _path_for(broker, userid, username)
+    path = _path_for(broker, userid)
     try:
         os.remove(path)
+        # Remove from GitHub as well
         try:
             rel_path = os.path.relpath(path, BASE_DIR).replace("\\", "/")
             _github_file_delete(rel_path)
@@ -701,7 +595,6 @@ def _delete_client_file(broker: str, userid: str, username: Optional[str] = None
     except Exception as e:
         raise HTTPException(status_code=500,
                             detail=f"Failed deleting {broker}/{userid}: {e}")
-
     
 
 def _list_groups() -> list[dict]:
@@ -840,6 +733,15 @@ def _build_multipliers(children: list[str], rawm) -> dict[str, float]:
 
 # ---------- routes ----------
 
+@router.post("/create_user")
+def api_create_user(payload: dict):
+    username = payload.get("username", "").strip()
+    password = payload.get("password", "").strip()
+    email = payload.get("email", "").strip()
+
+    return create_new_user(username, password, email)
+
+
 @app.on_event("startup")
 def _symbols_startup():
     _lazy_init_symbol_db()
@@ -859,26 +761,17 @@ def health():
     return {"ok": True, "brokers": status}
 
 @app.post("/add_client")
-def add_client(
-    background_tasks: BackgroundTasks,
-    payload: Dict[str, Any] = Body(...),
-    current_user: Optional[str] = Depends(get_current_user),
-):
+def add_client(background_tasks: BackgroundTasks, payload: Dict[str, Any] = Body(...)):
     broker = (_pick(payload.get("broker")) or "motilal").lower()
     if broker not in ("dhan", "motilal"):
         raise HTTPException(status_code=400, detail=f"Unknown broker '{broker}'")
 
-    path = _save_minimal(broker, payload, current_user)
+    path = _save_minimal(broker, payload)
     background_tasks.add_task(_dispatch_login, broker, path)
     return {"success": True, "message": f"Saved for {broker}. Login started if fields complete."}
 
-
 @app.post("/edit_client")
-def edit_client(
-    background_tasks: BackgroundTasks,
-    payload: Dict[str, Any] = Body(...),
-    current_user: Optional[str] = Depends(get_current_user),
-):
+def edit_client(background_tasks: BackgroundTasks, payload: Dict[str, Any] = Body(...)):
     """
     Edits an existing client. Accepts the same payload shape as /add_client,
     plus optional original_broker/original_userid when renaming/moving.
@@ -888,70 +781,41 @@ def edit_client(
     if broker not in ("dhan", "motilal"):
         raise HTTPException(status_code=400, detail=f"Unknown broker '{broker}'")
 
-    path = _update_minimal(broker, payload, current_user)
+    path = _update_minimal(broker, payload)
     background_tasks.add_task(_dispatch_login, broker, path)
     return {"success": True, "message": f"Updated for {broker}. Login started if fields complete."}
 
 
 @app.get("/clients")
-def clients_rows(current_user: Optional[str] = Depends(get_current_user)):
+def clients_rows():
     rows: List[Dict[str, Any]] = []
-
-    if current_user:
-        # Per-user folders
-        root = _ensure_user_tree(current_user)
-        folders = (
-            ("dhan",    os.path.join(root, "clients", "dhan")),
-            ("motilal", os.path.join(root, "clients", "motilal")),
-        )
-    else:
-        # Backward-compatible global folders
-        folders = (("dhan", DHAN_DIR), ("motilal", MO_DIR))
-
-    for brk, folder in folders:
-        try:
-            for fn in os.listdir(folder):
-                if not fn.endswith(".json"):
-                    continue
-                with open(os.path.join(folder, fn), "r", encoding="utf-8") as f:
-                    d = json.load(f)
+    for brk, folder in (("dhan", DHAN_DIR), ("motilal", MO_DIR)):
+        for fn in os.listdir(folder):
+            if not fn.endswith(".json"): continue
+            try:
+                with open(os.path.join(folder, fn), "r") as f: d = json.load(f)
                 rows.append({
-                    "name": d.get("name", ""),
-                    "display_name": d.get("name", ""),
-                    "client_id": d.get("userid", ""),
-                    "capital": d.get("capital", ""),
+                    "name": d.get("name",""),
+                    "display_name": d.get("name",""),
+                    "client_id": d.get("userid",""),
+                    "capital": d.get("capital",""),
                     "status": "logged_in" if d.get("session_active") else "logged_out",
                     "session_active": bool(d.get("session_active", False)),
-                    "broker": brk,
+                    "broker": brk
                 })
-        except FileNotFoundError:
-            continue
-        except Exception:
-            continue
-
+            except: pass
     return rows
 
-
 @app.get("/get_clients")
-def get_clients_legacy(current_user: Optional[str] = Depends(get_current_user)):
-    rows = clients_rows(current_user=current_user)
-    return {
-        "clients": [
-            {
-                "name": r["name"],
-                "client_id": r["client_id"],
-                "capital": r["capital"],
-                "session": "Logged in" if r["session_active"] else "Logged out",
-            }
-            for r in rows
-        ]
-    }
-
+def get_clients_legacy():
+    rows = clients_rows()
+    return {"clients": [
+        {"name": r["name"], "client_id": r["client_id"], "capital": r["capital"],
+         "session": "Logged in" if r["session_active"] else "Logged out"}
+        for r in rows
+    ]}
 @app.post("/delete_client")
-def delete_client(
-    payload: Dict[str, Any] = Body(...),
-    current_user: Optional[str] = Depends(get_current_user),
-):
+def delete_client(payload: Dict[str, Any] = Body(...)):
     """
     Delete one or many clients.
 
@@ -965,6 +829,7 @@ def delete_client(
     """
     deleted, missing = [], []
 
+    # unify into a list of {broker, userid}
     items: List[Dict[str, str]] = []
     if "items" in payload and isinstance(payload["items"], list):
         items = payload["items"]
@@ -974,19 +839,19 @@ def delete_client(
     else:
         items = [payload]
 
+    # process
     for it in items:
         broker = (_pick(it.get("broker")) or "").lower()
         userid = _pick(it.get("userid"), it.get("client_id"))
         if not broker or not userid:
             missing.append({"broker": broker, "userid": userid, "reason": "missing broker/userid"})
             continue
-        if _delete_client_file(broker, userid, current_user):
+        if _delete_client_file(broker, userid):
             deleted.append({"broker": broker, "userid": userid})
         else:
             missing.append({"broker": broker, "userid": userid, "reason": "not found"})
 
     return {"success": True, "deleted": deleted, "missing": missing}
-
 
 
 @app.post("/add_group")
@@ -1298,29 +1163,19 @@ def _guess_broker_from_order(order: Dict[str, Any]) -> str | None:
 
 
 # ---- helper to locate which broker a name belongs to
-def _broker_by_client_name(name: str, username: Optional[str] = None) -> str | None:
+def _broker_by_client_name(name: str) -> str | None:
     if not name:
         return None
     needle = str(name).strip().lower()
-
-    if username:
-        root = _ensure_user_tree(username)
-        folders = (
-            ("dhan",     os.path.join(root, "clients", "dhan")),
-            ("motilal",  os.path.join(root, "clients", "motilal")),
-        )
-    else:
-        folders = (("dhan", DHAN_DIR), ("motilal", MO_DIR))
-
-    for brk, folder in folders:
+    for brk, folder in (("dhan", DHAN_DIR), ("motilal", MO_DIR)):
         try:
             for fn in os.listdir(folder):
-                if not fn.endswith(".json"):
+                if not fn.endswith('.json'):
                     continue
                 try:
-                    with open(os.path.join(folder, fn), "r", encoding="utf-8") as f:
+                    with open(os.path.join(folder, fn), 'r', encoding='utf-8') as f:
                         d = json.load(f)
-                    nm = (d.get("name") or d.get("display_name") or "").strip().lower()
+                    nm = (d.get('name') or d.get('display_name') or '').strip().lower()
                     if nm == needle:
                         return brk
                 except Exception:
@@ -1328,7 +1183,6 @@ def _broker_by_client_name(name: str, username: Optional[str] = None) -> str | N
         except FileNotFoundError:
             pass
     return None
-
 
 @app.get('/get_orders')
 def route_get_orders():
@@ -1346,6 +1200,125 @@ def route_get_orders():
         except Exception as e:
             print(f"[router] get_orders error for {brk}: {e}")
     return buckets
+
+
+
+@app.post("/cancel_order")
+def route_cancel_order(payload: Dict[str, Any] = Body(...)):
+    orders = payload.get("orders", [])
+    if not isinstance(orders, list) or not orders:
+        raise HTTPException(status_code=400, detail="❌ No orders received for cancellation.")
+
+    # --- bucket by broker using your working helper
+    by_broker: Dict[str, List[Dict[str, Any]]] = {"dhan": [], "motilal": []}
+    unknown: List[str] = []
+    for od in orders:
+        name = (od or {}).get("name", "")
+        brk = _broker_by_client_name(name)
+        if brk in by_broker:
+            by_broker[brk].append(od)
+        else:
+            unknown.append(name or str(od))
+
+    messages: List[str] = []
+
+    # -------------------------
+    # D H A N
+    # -------------------------
+    if by_broker["dhan"]:
+        try:
+            dh = importlib.import_module("Broker_dhan")
+
+            # Prefer a batch API if the module provides one
+            if hasattr(dh, "cancel_orders") and callable(getattr(dh, "cancel_orders")):
+                res = dh.cancel_orders(by_broker["dhan"])
+                if isinstance(res, list):
+                    messages.extend([str(x) for x in res])
+                elif isinstance(res, dict) and isinstance(res.get("message"), list):
+                    messages.extend([str(x) for x in res["message"]])
+                else:
+                    messages.append(str(res))
+            else:
+                # Fallback: call single-order helper cancel_order_dhan(...)
+                def _load_dhan_json(name: str) -> Optional[Dict[str, Any]]:
+                    needle = (name or "").strip().lower()
+                    try:
+                        for fn in os.listdir(DHAN_DIR):
+                            if not fn.endswith(".json"):
+                                continue
+                            path = os.path.join(DHAN_DIR, fn)
+                            with open(path, "r", encoding="utf-8") as f:
+                                cj = json.load(f)
+                            nm = (cj.get("name") or cj.get("display_name") or "").strip().lower()
+                            if nm == needle:
+                                return cj
+                    except FileNotFoundError:
+                        pass
+                    return None
+
+                for od in by_broker["dhan"]:
+                    name = od.get("name", "")
+                    oid  = od.get("order_id", "")
+                    cj   = _load_dhan_json(name)
+                    if not cj or not oid:
+                        messages.append(f"❌ Missing client JSON or order_id for {name}")
+                        continue
+                    try:
+                        resp = dh.cancel_order_dhan(cj, oid)
+                        ok = isinstance(resp, dict) and str(resp.get("status", "")).lower() == "success"
+                        if ok:
+                            messages.append(f"✅ Cancelled Order {oid} for {name}")
+                        else:
+                            err = (resp.get("message") if isinstance(resp, dict) else resp)
+                            messages.append(f"❌ Failed to cancel Order {oid} for {name}: {err}")
+                    except Exception as e:
+                        messages.append(f"❌ dhan cancel failed for {name}: {e}")
+
+        except Exception as e:
+            messages.append(f"❌ dhan cancel failed: {e}")
+
+    # -------------------------
+    # M O T I L A L
+    # -------------------------
+    if by_broker["motilal"]:
+        try:
+            mo = importlib.import_module("Broker_motilal")
+            if hasattr(mo, "cancel_orders") and callable(getattr(mo, "cancel_orders")):
+                res = mo.cancel_orders(by_broker["motilal"])
+                if isinstance(res, list):
+                    messages.extend([str(x) for x in res])
+                elif isinstance(res, dict) and isinstance(res.get("message"), list):
+                    messages.extend([str(x) for x in res["message"]])
+                else:
+                    messages.append(str(res))
+            else:
+                # Very defensive fallback: try a per-order function if it exists
+                for od in by_broker["motilal"]:
+                    try:
+                        if hasattr(mo, "cancel_order"):
+                            r = mo.cancel_order({"orders": [od]})
+                            if isinstance(r, dict) and isinstance(r.get("message"), list):
+                                messages.extend([str(x) for x in r["message"]])
+                            else:
+                                messages.append(str(r))
+                        else:
+                            messages.append("❌ motilal cancel: no suitable function exported")
+                    except Exception as e:
+                        messages.append(f"❌ motilal cancel failed: {e}")
+        except Exception as e:
+            messages.append(f"❌ motilal cancel failed: {e}")
+
+    # If nothing matched, keep the UI behaviour you expect
+    if not by_broker["dhan"] and not by_broker["motilal"]:
+        return {"message": ["No matching broker for the selected orders."]}
+
+    if unknown:
+        messages.append("ℹ️ Unknown broker for: " + ", ".join(sorted(set(unknown))))
+
+    return {"message": messages}
+
+
+
 
 
 @app.get("/get_positions")
@@ -1473,10 +1446,11 @@ def _pick_qty_for_client(ci: dict, per_client_qty: dict, default_qty: int) -> in
 
 
 @app.post("/place_orders")
-def route_place_orders(
-    payload: Dict[str, Any] = Body(...),
-    current_user: Optional[str] = Depends(get_current_user),
-):
+def route_place_orders(payload: Dict[str, Any] = Body(...)):
+    import importlib, os, json, csv
+    from typing import Optional, Dict, Any, List
+
+    data = payload or {}
 
     # ------------------- robust symbol parsing -------------------
     raw_symbol = (data.get("symbol") or "").strip()  # "NSE|PNB EQ|110666|17000"
@@ -1540,22 +1514,15 @@ def route_place_orders(
     if "SL" in ordertype and triggerprice <= 0:
         raise HTTPException(status_code=400, detail="Trigger price is required for SL/SL-M orders.")
 
-       # ------------------- client index (userid -> broker/name/json) -------------------
-    # Use per-user folders when available, else fall back to global ones.
-    if current_user:
-        root = _ensure_user_tree(current_user)
-        DHAN_DIR_LOCAL = os.path.join(root, "clients", "dhan")
-        MO_DIR_LOCAL   = os.path.join(root, "clients", "motilal")
-    else:
-        DHAN_DIR_LOCAL = DHAN_DIR
-        MO_DIR_LOCAL   = MO_DIR
-
+    # ------------------- client index (userid -> broker/name/json) -------------------
+    BASE_DIR   = os.path.abspath(os.environ.get("DATA_DIR", "./data"))
+    DHAN_DIR   = os.path.join(BASE_DIR, "clients", "dhan")
+    MO_DIR     = os.path.join(BASE_DIR, "clients", "motilal")
     GROUPS_DIR = os.path.join(BASE_DIR, "groups")
-
 
     def _index_clients() -> Dict[str, Dict[str, Any]]:
         idx: Dict[str, Dict[str, Any]] = {}
-        for brk, folder in (("dhan", DHAN_DIR_LOCAL), ("motilal", MO_DIR_LOCAL)):
+        for brk, folder in (("dhan", DHAN_DIR), ("motilal", MO_DIR)):
             try:
                 for fn in os.listdir(folder):
                     if not fn.endswith(".json"):
@@ -2073,8 +2040,3 @@ def route_modify_order(payload: Dict[str, Any] = Body(...)):
 if __name__ == "__main__":
     import uvicorn
     uvicorn.run("MultiBroker_Router:app", host="127.0.0.1", port=5001, reload=False)
-
-
-
-
-
