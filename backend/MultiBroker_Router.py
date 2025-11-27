@@ -1,28 +1,27 @@
 # backend/MultiBroker_Router.py
 
+import os, json, base64, logging, uuid, hashlib
+from datetime import datetime
+from typing import Dict, Any, List, Optional
+
+import requests
 from fastapi import FastAPI, HTTPException, Depends, Header
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
-from typing import Optional, Dict, Any, List
-import os
-import json
-from datetime import datetime
-import uuid
-import logging
 
 APP_TITLE = "Wealth Ocean Multi-Broker Router"
-APP_VERSION = "0.3.1"
+APP_VERSION = "0.4.0"
 
 logger = logging.getLogger("uvicorn.error")
 
 app = FastAPI(title=APP_TITLE, version=APP_VERSION)
 
-# ---------------------------------------------------------------------
-# CORS – allow your Next.js frontend to talk to this API
-# ---------------------------------------------------------------------
-# Your frontend URL from the screenshot:
-DEFAULT_FRONTEND_ORIGIN = "https://multibrokertradermultiuser-production-f735.up.railway.app"
-
+# ---------------------------------------------------------
+# CORS  (frontend → backend)
+# ---------------------------------------------------------
+DEFAULT_FRONTEND_ORIGIN = (
+    "https://multibrokertradermultiuser-production-f735.up.railway.app"
+)
 FRONTEND_ORIGIN = os.getenv("FRONTEND_ORIGIN", DEFAULT_FRONTEND_ORIGIN)
 
 logger.info(f"Using FRONTEND_ORIGIN for CORS: {FRONTEND_ORIGIN}")
@@ -35,9 +34,9 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# ---------------------------------------------------------------------
-# Basic filesystem helpers
-# ---------------------------------------------------------------------
+# ---------------------------------------------------------
+# Local storage
+# ---------------------------------------------------------
 DATA_DIR = os.path.abspath(
     os.getenv("DATA_DIR", os.path.join(os.path.dirname(__file__), "data"))
 )
@@ -55,7 +54,7 @@ def load_json(path: str, default):
         with open(path, "r", encoding="utf-8") as f:
             return json.load(f)
     except Exception as e:
-        logger.error(f"Failed to load JSON {path}: {e}")
+        logger.error(f"load_json failed for {path}: {e}")
         return default
 
 
@@ -71,15 +70,95 @@ def now_str() -> str:
     return datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 
 
-# ---------------------------------------------------------------------
-# In-memory token store (simple for now)
-# ---------------------------------------------------------------------
+# ---------------------------------------------------------
+# GitHub config + helpers
+# ---------------------------------------------------------
+GITHUB_REPO = os.getenv("GITHUB_REPO", "")
+GITHUB_TOKEN = os.getenv("GITHUB_TOKEN", "")
+GITHUB_BRANCH = os.getenv("GITHUB_BRANCH", "main")
+ENABLE_GITHUB = bool(GITHUB_REPO and GITHUB_TOKEN)
+
+if ENABLE_GITHUB:
+    logger.info(f"GitHub sync ENABLED for repo {GITHUB_REPO} (branch {GITHUB_BRANCH})")
+else:
+    logger.warning("GitHub sync DISABLED (set GITHUB_REPO and GITHUB_TOKEN to enable)")
+
+
+def _gh_headers():
+    return {
+        "Authorization": f"Bearer {GITHUB_TOKEN}",
+        "Accept": "application/vnd.github.v3+json",
+    }
+
+
+def _gh_url(path: str) -> str:
+    return f"https://api.github.com/repos/{GITHUB_REPO}/contents/{path}"
+
+
+def github_write_file(path: str, content: str, message: str) -> None:
+    """Create or update a file in the GitHub repo."""
+    if not ENABLE_GITHUB:
+        return
+
+    url = _gh_url(path)
+    sha = None
+
+    r = requests.get(url, headers=_gh_headers())
+    if r.status_code == 200:
+        sha = r.json().get("sha")
+    elif r.status_code not in (404,):
+        logger.error(f"GitHub GET failed for {path}: {r.status_code} {r.text}")
+        return
+
+    payload = {
+        "message": message,
+        "content": base64.b64encode(content.encode("utf-8")).decode("ascii"),
+        "branch": GITHUB_BRANCH,
+    }
+    if sha:
+        payload["sha"] = sha
+
+    resp = requests.put(url, headers=_gh_headers(), json=payload)
+    if resp.status_code not in (200, 201):
+        logger.error(
+            f"GitHub write failed for {path}: {resp.status_code} {resp.text}"
+        )
+    else:
+        logger.info(f"GitHub write OK for {path}")
+
+
+def github_delete_file(path: str, message: str) -> None:
+    """Delete a file from the GitHub repo (if it exists)."""
+    if not ENABLE_GITHUB:
+        return
+
+    url = _gh_url(path)
+    r = requests.get(url, headers=_gh_headers())
+    if r.status_code == 404:
+        return
+    if r.status_code != 200:
+        logger.error(
+            f"GitHub GET-before-delete failed for {path}: {r.status_code} {r.text}"
+        )
+        return
+
+    sha = r.json().get("sha")
+    payload = {"message": message, "sha": sha, "branch": GITHUB_BRANCH}
+    resp = requests.delete(url, headers=_gh_headers(), json=payload)
+    if resp.status_code not in (200, 204):
+        logger.error(
+            f"GitHub delete failed for {path}: {resp.status_code} {resp.text}"
+        )
+    else:
+        logger.info(f"GitHub delete OK for {path}")
+
+
+# ---------------------------------------------------------
+# User + auth helpers
+# ---------------------------------------------------------
 ACTIVE_TOKENS: Dict[str, str] = {}  # token -> username
 
 
-# ---------------------------------------------------------------------
-# User models
-# ---------------------------------------------------------------------
 class UserRegisterRequest(BaseModel):
     username: str = Field(..., min_length=3, max_length=50)
     password: str = Field(..., min_length=4, max_length=100)
@@ -108,8 +187,6 @@ def _save_users(data: Dict[str, Any]) -> None:
 
 
 def _hash_password(raw: str) -> str:
-    import hashlib
-
     return hashlib.sha256(raw.encode("utf-8")).hexdigest()
 
 
@@ -133,33 +210,23 @@ def _copy_file(username: str) -> str:
     return os.path.join(_user_root(username), "copy_setups.json")
 
 
-# ---------------------------------------------------------------------
-# Auth dependency
-# ---------------------------------------------------------------------
 def get_current_user(x_auth_token: str = Header(..., alias="x-auth-token")) -> str:
-    """
-    Read user from x-auth-token header.
-    On frontend, store token under localStorage 'woi_token' and
-    send it as x-auth-token.
-    """
     username = ACTIVE_TOKENS.get(x_auth_token)
     if not username:
-        logger.warning(f"Auth failed: invalid token {x_auth_token}")
         raise HTTPException(status_code=401, detail="Invalid or expired token")
-    logger.info(f"Authenticated request as user={username}")
     return username
 
 
-# ---------------------------------------------------------------------
-# Auth routes – /users/register, /users/login, /users/me
-# ---------------------------------------------------------------------
+# ---------------------------------------------------------
+# Auth routes
+# ---------------------------------------------------------
 @app.post("/users/register", response_model=AuthResponse)
 def register(req: UserRegisterRequest):
     users = _load_users()
     uname = req.username.strip()
-    logger.info(f"REGISTER attempt for username={uname}")
+    logger.info(f"REGISTER attempt: {uname}")
+
     if uname in users:
-        logger.warning(f"REGISTER failed: username {uname} already exists")
         raise HTTPException(status_code=400, detail="Username already exists")
 
     users[uname] = {
@@ -169,37 +236,42 @@ def register(req: UserRegisterRequest):
     }
     _save_users(users)
 
-    # Ensure user folders
-    user_root = _user_root(uname)
-    ensure_dir(user_root)
+    # local folders
+    ensure_dir(_user_root(uname))
     ensure_dir(_clients_root(uname))
 
-    # Auto-login
+    # create session token
     token = uuid.uuid4().hex
     ACTIVE_TOKENS[token] = uname
-    logger.info(f"REGISTER success for username={uname}, token={token}")
 
+    # sync user.json to GitHub (multi-user layout)
+    user_doc = {
+        "username": uname,
+        "created_at": users[uname]["created_at"],
+    }
+    github_write_file(
+        f"users/{uname}/user.json",
+        json.dumps(user_doc, indent=2),
+        f"Create user {uname}",
+    )
+
+    logger.info(f"REGISTER success for {uname}")
     return AuthResponse(success=True, username=uname, token=token)
 
 
 @app.post("/users/login", response_model=AuthResponse)
 def login(req: UserLoginRequest):
-    # --- DEBUG LOGS START ---
-    print("===== /users/login called =====")
-    print("Request body:", req.dict())
-    # --- DEBUG LOGS END ---
-
     users = _load_users()
     uname = req.username.strip()
-    print("Login attempt for username:", uname)
+    logger.info(f"LOGIN attempt: {uname}")
 
     if uname not in users:
-        print("Login FAILED: user not found:", uname)
+        logger.warning(f"LOGIN failed – user not found: {uname}")
         raise HTTPException(status_code=401, detail="Invalid username or password")
 
     stored = users[uname]
     if not _verify_password(req.password, stored.get("password_hash", "")):
-        print("Login FAILED: wrong password for:", uname)
+        logger.warning(f"LOGIN failed – bad password: {uname}")
         raise HTTPException(status_code=401, detail="Invalid username or password")
 
     stored["last_login_at"] = now_str()
@@ -207,28 +279,19 @@ def login(req: UserLoginRequest):
 
     token = uuid.uuid4().hex
     ACTIVE_TOKENS[token] = uname
+    logger.info(f"LOGIN success for {uname}")
 
-    resp = AuthResponse(success=True, username=uname, token=token)
-
-    # --- DEBUG LOGS START ---
-    print("Login SUCCESS for:", uname)
-    print("Response JSON:", resp.dict())
-    print("===== /users/login finished =====")
-    # --- DEBUG LOGS END ---
-
-    return resp
-
+    return AuthResponse(success=True, username=uname, token=token)
 
 
 @app.get("/users/me")
 def me(current_user: str = Depends(get_current_user)):
-    logger.info(f"/users/me called by {current_user}")
     return {"username": current_user}
 
 
-# ---------------------------------------------------------------------
-# Clients (Per-user, multi-broker)
-# ---------------------------------------------------------------------
+# ---------------------------------------------------------
+# Clients (per-user, multi-broker) + GitHub sync
+# ---------------------------------------------------------
 class ClientPayload(BaseModel):
     broker: str
     client_id: str
@@ -258,14 +321,20 @@ def _add_or_update_client(username: str, payload: ClientPayload) -> Dict[str, An
 
     if not os.path.exists(path):
         record["created_at"] = now_str()
-        logger.info(f"Created new client {payload.client_id} for user={username}")
     else:
         existing = load_json(path, {})
         if "created_at" in existing:
             record["created_at"] = existing["created_at"]
-        logger.info(f"Updated client {payload.client_id} for user={username}")
 
     save_json(path, record)
+
+    # GitHub sync: users/<user>/clients/<broker>/<client>.json
+    github_write_file(
+        f"users/{username}/clients/{payload.broker}/{payload.client_id}.json",
+        json.dumps(record, indent=2),
+        f"Save client {payload.client_id} for {username}",
+    )
+
     return record
 
 
@@ -285,7 +354,6 @@ def _list_clients(username: str) -> Dict[str, List[Dict[str, Any]]]:
         for fname in os.listdir(broker_dir):
             if not fname.endswith(".json"):
                 continue
-
             fpath = os.path.join(broker_dir, fname)
             data = load_json(fpath, {})
             if not data:
@@ -303,17 +371,20 @@ def _list_clients(username: str) -> Dict[str, List[Dict[str, Any]]]:
             )
         result[broker] = items
 
-    logger.info(f"Listed clients for user={username}")
     return result
 
 
 def _delete_client(username: str, broker: str, client_id: str) -> None:
     path = _client_path(username, broker, client_id)
     if not os.path.exists(path):
-        logger.warning(f"Tried to delete missing client {client_id} for user={username}")
         raise HTTPException(status_code=404, detail="Client not found")
+
     os.remove(path)
-    logger.info(f"Deleted client {client_id} for user={username}")
+
+    github_delete_file(
+        f"users/{username}/clients/{broker}/{client_id}.json",
+        f"Delete client {client_id} for {username}",
+    )
 
 
 @app.post("/clients/add")
@@ -348,7 +419,9 @@ def clients_delete(
     return {"status": "ok"}
 
 
-# --- Alias routes to match existing frontend: /users/* -------------------------
+# ---------------------------------------------------------
+# Alias routes used by current frontend (/users/* for clients)
+# ---------------------------------------------------------
 class DeleteClientBody(BaseModel):
     broker: str
     client_id: str
@@ -384,9 +457,9 @@ def users_delete_client(
     return {"status": "ok"}
 
 
-# ---------------------------------------------------------------------
+# ---------------------------------------------------------
 # Groups (per user)
-# ---------------------------------------------------------------------
+# ---------------------------------------------------------
 class GroupModel(BaseModel):
     name: str
     description: Optional[str] = None
@@ -415,7 +488,6 @@ def save_group(group: GroupModel, current_user: str = Depends(get_current_user))
             break
     else:
         groups.append(group.dict())
-
     _save_groups(current_user, groups)
     return {"status": "ok", "groups": groups}
 
@@ -434,9 +506,9 @@ def delete_group(
     return {"status": "ok", "groups": new_groups}
 
 
-# ---------------------------------------------------------------------
+# ---------------------------------------------------------
 # Copy-trading setups (per user)
-# ---------------------------------------------------------------------
+# ---------------------------------------------------------
 class CopySetupModel(BaseModel):
     id: Optional[str] = None
     name: str
@@ -464,7 +536,6 @@ def save_copy_setup(
     setup: CopySetupModel, current_user: str = Depends(get_current_user)
 ):
     setups = _load_copy_setups(current_user)
-
     if setup.id is None:
         setup.id = uuid.uuid4().hex
         setups.append(setup.dict())
@@ -475,7 +546,6 @@ def save_copy_setup(
                 break
         else:
             setups.append(setup.dict())
-
     _save_copy_setups(current_user, setups)
     return {"status": "ok", "setups": setups}
 
@@ -514,11 +584,10 @@ def delete_copy(body: CopyIdBody, current_user: str = Depends(get_current_user))
     return {"status": "ok", "setups": setups}
 
 
-# ---------------------------------------------------------------------
-# Local dev entry-point
-# ---------------------------------------------------------------------
+# ---------------------------------------------------------
+# Local dev entry point
+# ---------------------------------------------------------
 if __name__ == "__main__":
     import uvicorn
 
     uvicorn.run("MultiBroker_Router:app", host="0.0.0.0", port=8000, reload=True)
-
