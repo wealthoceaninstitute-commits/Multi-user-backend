@@ -10,7 +10,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
 
 APP_TITLE = "Wealth Ocean Multi-Broker Router"
-APP_VERSION = "0.5.0"
+APP_VERSION = "0.6.0"
 
 logger = logging.getLogger("uvicorn.error")
 
@@ -38,7 +38,7 @@ app.add_middleware(
 )
 
 # ---------------------------------------------------------
-# Local filesystem storage
+# Local filesystem cache (optional)
 # ---------------------------------------------------------
 DATA_DIR = os.path.abspath(
     os.getenv("DATA_DIR", os.path.join(os.path.dirname(__file__), "data"))
@@ -74,7 +74,7 @@ def now_str() -> str:
 
 
 # ---------------------------------------------------------
-# GitHub sync configuration
+# GitHub sync configuration (source of truth)
 # ---------------------------------------------------------
 DEFAULT_GITHUB_REPO = "wealthoceaninstitute-commits/Clients"
 GITHUB_REPO = os.getenv("GITHUB_REPO", DEFAULT_GITHUB_REPO)
@@ -105,6 +105,33 @@ def _gh_url(path: str) -> str:
     return f"https://api.github.com/repos/{GITHUB_REPO}/contents/{path}"
 
 
+def github_read_json(path: str, default):
+    """Read JSON file from GitHub repo."""
+    if not ENABLE_GITHUB:
+        return default
+
+    url = _gh_url(path)
+    try:
+        r = requests.get(url, headers=_gh_headers(), timeout=20)
+    except Exception as e:
+        logger.error(f"GitHub GET error for {path}: {e}")
+        return default
+
+    if r.status_code == 404:
+        return default
+    if r.status_code != 200:
+        logger.error(f"GitHub GET failed for {path}: {r.status_code} {r.text}")
+        return default
+
+    try:
+        content_b64 = r.json().get("content", "")
+        raw = base64.b64decode(content_b64).decode("utf-8")
+        return json.loads(raw)
+    except Exception as e:
+        logger.error(f"GitHub JSON decode failed for {path}: {e}")
+        return default
+
+
 def github_write_file(path: str, content: str, message: str) -> None:
     """Create or update a file in GitHub repo."""
     if not ENABLE_GITHUB:
@@ -114,7 +141,7 @@ def github_write_file(path: str, content: str, message: str) -> None:
     sha = None
 
     try:
-        r = requests.get(url, headers=_gh_headers(), timeout=15)
+        r = requests.get(url, headers=_gh_headers(), timeout=20)
     except Exception as e:
         logger.error(f"GitHub GET error for {path}: {e}")
         return
@@ -134,7 +161,7 @@ def github_write_file(path: str, content: str, message: str) -> None:
         payload["sha"] = sha
 
     try:
-        resp = requests.put(url, headers=_gh_headers(), json=payload, timeout=20)
+        resp = requests.put(url, headers=_gh_headers(), json=payload, timeout=25)
     except Exception as e:
         logger.error(f"GitHub PUT error for {path}: {e}")
         return
@@ -152,7 +179,7 @@ def github_delete_file(path: str, message: str) -> None:
 
     url = _gh_url(path)
     try:
-        r = requests.get(url, headers=_gh_headers(), timeout=15)
+        r = requests.get(url, headers=_gh_headers(), timeout=20)
     except Exception as e:
         logger.error(f"GitHub GET-before-delete error for {path}: {e}")
         return
@@ -169,7 +196,7 @@ def github_delete_file(path: str, message: str) -> None:
     payload = {"message": message, "sha": sha, "branch": GITHUB_BRANCH}
 
     try:
-        resp = requests.delete(url, headers=_gh_headers(), json=payload, timeout=20)
+        resp = requests.delete(url, headers=_gh_headers(), json=payload, timeout=25)
     except Exception as e:
         logger.error(f"GitHub DELETE error for {path}: {e}")
         return
@@ -181,7 +208,7 @@ def github_delete_file(path: str, message: str) -> None:
 
 
 # ---------------------------------------------------------
-# User & auth logic
+# User & auth logic – stored in GitHub
 # ---------------------------------------------------------
 ACTIVE_TOKENS: Dict[str, str] = {}  # token -> username
 
@@ -200,17 +227,6 @@ class AuthResponse(BaseModel):
     success: bool = True
     username: str
     token: str
-
-
-def _load_users() -> Dict[str, Any]:
-    data = load_json(USERS_FILE, {})
-    if not isinstance(data, dict):
-        data = {}
-    return data
-
-
-def _save_users(data: Dict[str, Any]) -> None:
-    save_json(USERS_FILE, data)
 
 
 def _hash_password(raw: str) -> str:
@@ -237,6 +253,37 @@ def _copy_file(username: str) -> str:
     return os.path.join(_user_root(username), "copy_setups.json")
 
 
+def _load_users() -> Dict[str, Any]:
+    """
+    Master user DB loaded from GitHub path: users/users.json
+    {
+      "pramod": { "password_hash": "...", "created_at": "...", "updated_at": "...", ... },
+      ...
+    }
+    """
+    if ENABLE_GITHUB:
+        data = github_read_json("users/users.json", {})
+    else:
+        data = load_json(USERS_FILE, {})
+    if not isinstance(data, dict):
+        data = {}
+    return data
+
+
+def _save_users(data: Dict[str, Any]) -> None:
+    """
+    Save master user DB back to GitHub (and optionally local cache).
+    """
+    if ENABLE_GITHUB:
+        github_write_file(
+            "users/users.json",
+            json.dumps(data, indent=2),
+            "Update users DB",
+        )
+    else:
+        save_json(USERS_FILE, data)
+
+
 def get_current_user(x_auth_token: str = Header(..., alias="x-auth-token")) -> str:
     username = ACTIVE_TOKENS.get(x_auth_token)
     if not username:
@@ -261,7 +308,7 @@ def register(req: UserRegisterRequest):
     }
     _save_users(users)
 
-    # local folders
+    # local folders (cache)
     ensure_dir(_user_root(uname))
     ensure_dir(_clients_root(uname))
 
@@ -269,7 +316,7 @@ def register(req: UserRegisterRequest):
     token = uuid.uuid4().hex
     ACTIVE_TOKENS[token] = uname
 
-    # GitHub: create users/<user>/user.json
+    # GitHub: per-user metadata file (no password)
     user_doc = {
         "username": uname,
         "created_at": users[uname]["created_at"],
@@ -297,6 +344,7 @@ def login(req: UserLoginRequest):
     if not _verify_password(req.password, stored.get("password_hash", "")):
         raise HTTPException(status_code=401, detail="Invalid username or password")
 
+    stored["updated_at"] = now_str()
     stored["last_login_at"] = now_str()
     _save_users(users)
 
@@ -477,7 +525,7 @@ def users_delete_client(
 
 
 # ---------------------------------------------------------
-# Groups (per user)
+# Groups (per user)  (stored in GitHub)
 # ---------------------------------------------------------
 class GroupModel(BaseModel):
     name: str
@@ -486,11 +534,24 @@ class GroupModel(BaseModel):
 
 
 def _load_groups(username: str) -> List[Dict[str, Any]]:
-    return load_json(_groups_file(username), [])
+    if ENABLE_GITHUB:
+        data = github_read_json(f"users/{username}/groups.json", [])
+    else:
+        data = load_json(_groups_file(username), [])
+    if not isinstance(data, list):
+        data = []
+    return data
 
 
 def _save_groups(username: str, groups: List[Dict[str, Any]]) -> None:
+    # cache
     save_json(_groups_file(username), groups)
+    # GitHub
+    github_write_file(
+        f"users/{username}/groups.json",
+        json.dumps(groups, indent=2),
+        f"Save groups for {username}",
+    )
 
 
 @app.get("/users/groups")
@@ -526,23 +587,34 @@ def delete_group(
 
 
 # ---------------------------------------------------------
-# Copy-trading setups (per user)
+# Copy-trading setups (per user)  (stored in GitHub)
 # ---------------------------------------------------------
 class CopySetupModel(BaseModel):
     id: Optional[str] = None
     name: str
-    source_client: str   # e.g., "dhan-TRADER1"
-    group_name: str      # GroupModel.name
+    source_client: str
+    group_name: str
     multiplier: float = 1.0
     active: bool = True
 
 
 def _load_copy_setups(username: str) -> List[Dict[str, Any]]:
-    return load_json(_copy_file(username), [])
+    if ENABLE_GITHUB:
+        data = github_read_json(f"users/{username}/copy_setups.json", [])
+    else:
+        data = load_json(_copy_file(username), [])
+    if not isinstance(data, list):
+        data = []
+    return data
 
 
 def _save_copy_setups(username: str, setups: List[Dict[str, Any]]) -> None:
     save_json(_copy_file(username), setups)
+    github_write_file(
+        f"users/{username}/copy_setups.json",
+        json.dumps(setups, indent=2),
+        f"Save copy setups for {username}",
+    )
 
 
 @app.get("/users/copy/setups")
