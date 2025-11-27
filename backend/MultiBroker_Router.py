@@ -7,7 +7,7 @@
 # - Copy-trading setups (per user)
 #
 # Auth header: x-auth-token
-# Token is stored in localStorage as "woi_token" on frontend (recommended)
+# Frontend stores token in localStorage as "woi_token"
 
 from fastapi import FastAPI, HTTPException, Depends, Header
 from fastapi.middleware.cors import CORSMiddleware
@@ -19,7 +19,7 @@ from datetime import datetime
 import uuid
 
 APP_TITLE = "Wealth Ocean Multi-Broker Router"
-APP_VERSION = "0.2.0"
+APP_VERSION = "0.3.0"
 
 app = FastAPI(title=APP_TITLE, version=APP_VERSION)
 
@@ -28,7 +28,7 @@ app = FastAPI(title=APP_TITLE, version=APP_VERSION)
 # ---------------------------------------------------------------------
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],          # tighten later if needed
+    allow_origins=["*"],          # tighten later
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -88,7 +88,8 @@ class UserLoginRequest(BaseModel):
     password: str
 
 
-class UserResponse(BaseModel):
+class AuthResponse(BaseModel):
+    success: bool = True
     username: str
     token: str
 
@@ -148,7 +149,7 @@ def get_current_user(x_auth_token: str = Header(..., alias="x-auth-token")) -> s
 # ---------------------------------------------------------------------
 # Auth routes – /users/register, /users/login, /users/me
 # ---------------------------------------------------------------------
-@app.post("/users/register", response_model=UserResponse)
+@app.post("/users/register", response_model=AuthResponse)
 def register(req: UserRegisterRequest):
     users = _load_users()
     uname = req.username.strip()
@@ -159,6 +160,7 @@ def register(req: UserRegisterRequest):
         "password_hash": _hash_password(req.password),
         "created_at": now_str(),
         "updated_at": now_str(),
+        "email": None,
     }
     _save_users(users)
 
@@ -171,10 +173,10 @@ def register(req: UserRegisterRequest):
     token = uuid.uuid4().hex
     ACTIVE_TOKENS[token] = uname
 
-    return UserResponse(username=uname, token=token)
+    return AuthResponse(success=True, username=uname, token=token)
 
 
-@app.post("/users/login", response_model=UserResponse)
+@app.post("/users/login", response_model=AuthResponse)
 def login(req: UserLoginRequest):
     users = _load_users()
     uname = req.username.strip()
@@ -192,7 +194,7 @@ def login(req: UserLoginRequest):
     token = uuid.uuid4().hex
     ACTIVE_TOKENS[token] = uname
 
-    return UserResponse(username=uname, token=token)
+    return AuthResponse(success=True, username=uname, token=token)
 
 
 @app.get("/users/me")
@@ -233,7 +235,6 @@ def _add_or_update_client(username: str, payload: ClientPayload) -> Dict[str, An
     if not os.path.exists(path):
         record["created_at"] = now_str()
     else:
-        # preserve original created_at if exists
         existing = load_json(path, {})
         if "created_at" in existing:
             record["created_at"] = existing["created_at"]
@@ -286,7 +287,6 @@ def _delete_client(username: str, broker: str, client_id: str) -> None:
     os.remove(path)
 
 
-# --- Core clients routes -------------------------------------------------------
 @app.post("/clients/add")
 def clients_add(
     payload: ClientPayload, current_user: str = Depends(get_current_user)
@@ -325,14 +325,12 @@ class DeleteClientBody(BaseModel):
     client_id: str
 
 
-# list clients (used by TradeForm.jsx / Clients.jsx)
 @app.get("/users/clients")
 @app.get("/users/get_clients")
 def users_clients(current_user: str = Depends(get_current_user)):
     return {"status": "ok", "clients": _list_clients(current_user)}
 
 
-# add client
 @app.post("/users/add_client")
 def users_add_client(
     payload: ClientPayload, current_user: str = Depends(get_current_user)
@@ -341,7 +339,6 @@ def users_add_client(
     return {"status": "ok", "client": record}
 
 
-# edit client (same as add, but overwrites)
 @app.post("/users/edit_client")
 def users_edit_client(
     payload: ClientPayload, current_user: str = Depends(get_current_user)
@@ -350,7 +347,6 @@ def users_edit_client(
     return {"status": "ok", "client": record}
 
 
-# delete client (for POST with JSON body)
 @app.post("/users/delete_client")
 def users_delete_client(
     body: DeleteClientBody, current_user: str = Depends(get_current_user)
@@ -365,8 +361,7 @@ def users_delete_client(
 class GroupModel(BaseModel):
     name: str
     description: Optional[str] = None
-    # client keys like "dhan-AB123", "motilal-MO123"
-    clients: List[str] = []
+    clients: List[str] = []  # keys like "dhan-AB123"
 
 
 def _load_groups(username: str) -> List[Dict[str, Any]]:
@@ -379,18 +374,11 @@ def _save_groups(username: str, groups: List[Dict[str, Any]]) -> None:
 
 @app.get("/users/groups")
 def get_groups(current_user: str = Depends(get_current_user)):
-    """
-    Returns all groups for the logged-in user.
-    """
     return {"status": "ok", "groups": _load_groups(current_user)}
 
 
 @app.post("/users/groups/save")
 def save_group(group: GroupModel, current_user: str = Depends(get_current_user)):
-    """
-    Create or update a group.
-    If group.name exists, it is updated; otherwise, it is added.
-    """
     groups = _load_groups(current_user)
     for g in groups:
         if g.get("name") == group.name:
@@ -439,9 +427,6 @@ def _save_copy_setups(username: str, setups: List[Dict[str, Any]]) -> None:
 
 @app.get("/users/copy/setups")
 def get_copy_setups(current_user: str = Depends(get_current_user)):
-    """
-    List all copy-trading setups for this user.
-    """
     return {"status": "ok", "setups": _load_copy_setups(current_user)}
 
 
@@ -449,11 +434,6 @@ def get_copy_setups(current_user: str = Depends(get_current_user)):
 def save_copy_setup(
     setup: CopySetupModel, current_user: str = Depends(get_current_user)
 ):
-    """
-    Create or update a copy-trading setup.
-    - If setup.id is None → create new (generate id)
-    - Else → update existing
-    """
     setups = _load_copy_setups(current_user)
 
     if setup.id is None:
