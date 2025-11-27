@@ -10,32 +10,35 @@ from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
 
 APP_TITLE = "Wealth Ocean Multi-Broker Router"
-APP_VERSION = "0.4.0"
+APP_VERSION = "0.5.0"
 
 logger = logging.getLogger("uvicorn.error")
 
 app = FastAPI(title=APP_TITLE, version=APP_VERSION)
 
 # ---------------------------------------------------------
-# CORS  (frontend → backend)
+# CORS configuration – uses ALLOWED_ORIGINS from env
 # ---------------------------------------------------------
-DEFAULT_FRONTEND_ORIGIN = (
-    "https://multibrokertradermultiuser-production-f735.up.railway.app"
-)
-FRONTEND_ORIGIN = os.getenv("FRONTEND_ORIGIN", DEFAULT_FRONTEND_ORIGIN)
+DEFAULT_FRONTEND = "https://multibrokertradermultiuser-production-f735.up.railway.app"
+allowed_env = os.getenv("ALLOWED_ORIGINS", "").strip()
 
-logger.info(f"Using FRONTEND_ORIGIN for CORS: {FRONTEND_ORIGIN}")
+if allowed_env:
+    ORIGINS = [o.strip() for o in allowed_env.split(",") if o.strip()]
+else:
+    ORIGINS = [DEFAULT_FRONTEND]
+
+logger.info(f"CORS allowed origins: {ORIGINS}")
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=[FRONTEND_ORIGIN],
+    allow_origins=ORIGINS,
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
 )
 
 # ---------------------------------------------------------
-# Local storage
+# Local filesystem storage
 # ---------------------------------------------------------
 DATA_DIR = os.path.abspath(
     os.getenv("DATA_DIR", os.path.join(os.path.dirname(__file__), "data"))
@@ -71,17 +74,24 @@ def now_str() -> str:
 
 
 # ---------------------------------------------------------
-# GitHub config + helpers
+# GitHub sync configuration
 # ---------------------------------------------------------
-GITHUB_REPO = os.getenv("GITHUB_REPO", "")
+DEFAULT_GITHUB_REPO = "wealthoceaninstitute-commits/Clients"
+GITHUB_REPO = os.getenv("GITHUB_REPO", DEFAULT_GITHUB_REPO)
 GITHUB_TOKEN = os.getenv("GITHUB_TOKEN", "")
 GITHUB_BRANCH = os.getenv("GITHUB_BRANCH", "main")
-ENABLE_GITHUB = bool(GITHUB_REPO and GITHUB_TOKEN)
+
+ENABLE_GITHUB = bool(GITHUB_TOKEN)
 
 if ENABLE_GITHUB:
-    logger.info(f"GitHub sync ENABLED for repo {GITHUB_REPO} (branch {GITHUB_BRANCH})")
+    logger.info(
+        f"GitHub sync ENABLED: repo={GITHUB_REPO}, branch={GITHUB_BRANCH} (token present)"
+    )
 else:
-    logger.warning("GitHub sync DISABLED (set GITHUB_REPO and GITHUB_TOKEN to enable)")
+    logger.warning(
+        "GitHub sync DISABLED (GITHUB_TOKEN not set). "
+        "Set GITHUB_TOKEN env var to enable."
+    )
 
 
 def _gh_headers():
@@ -96,14 +106,19 @@ def _gh_url(path: str) -> str:
 
 
 def github_write_file(path: str, content: str, message: str) -> None:
-    """Create or update a file in the GitHub repo."""
+    """Create or update a file in GitHub repo."""
     if not ENABLE_GITHUB:
         return
 
     url = _gh_url(path)
     sha = None
 
-    r = requests.get(url, headers=_gh_headers())
+    try:
+        r = requests.get(url, headers=_gh_headers(), timeout=15)
+    except Exception as e:
+        logger.error(f"GitHub GET error for {path}: {e}")
+        return
+
     if r.status_code == 200:
         sha = r.json().get("sha")
     elif r.status_code not in (404,):
@@ -118,22 +133,30 @@ def github_write_file(path: str, content: str, message: str) -> None:
     if sha:
         payload["sha"] = sha
 
-    resp = requests.put(url, headers=_gh_headers(), json=payload)
+    try:
+        resp = requests.put(url, headers=_gh_headers(), json=payload, timeout=20)
+    except Exception as e:
+        logger.error(f"GitHub PUT error for {path}: {e}")
+        return
+
     if resp.status_code not in (200, 201):
-        logger.error(
-            f"GitHub write failed for {path}: {resp.status_code} {resp.text}"
-        )
+        logger.error(f"GitHub write failed for {path}: {resp.status_code} {resp.text}")
     else:
         logger.info(f"GitHub write OK for {path}")
 
 
 def github_delete_file(path: str, message: str) -> None:
-    """Delete a file from the GitHub repo (if it exists)."""
+    """Delete a file from GitHub repo (if it exists)."""
     if not ENABLE_GITHUB:
         return
 
     url = _gh_url(path)
-    r = requests.get(url, headers=_gh_headers())
+    try:
+        r = requests.get(url, headers=_gh_headers(), timeout=15)
+    except Exception as e:
+        logger.error(f"GitHub GET-before-delete error for {path}: {e}")
+        return
+
     if r.status_code == 404:
         return
     if r.status_code != 200:
@@ -144,17 +167,21 @@ def github_delete_file(path: str, message: str) -> None:
 
     sha = r.json().get("sha")
     payload = {"message": message, "sha": sha, "branch": GITHUB_BRANCH}
-    resp = requests.delete(url, headers=_gh_headers(), json=payload)
+
+    try:
+        resp = requests.delete(url, headers=_gh_headers(), json=payload, timeout=20)
+    except Exception as e:
+        logger.error(f"GitHub DELETE error for {path}: {e}")
+        return
+
     if resp.status_code not in (200, 204):
-        logger.error(
-            f"GitHub delete failed for {path}: {resp.status_code} {resp.text}"
-        )
+        logger.error(f"GitHub delete failed for {path}: {resp.status_code} {resp.text}")
     else:
         logger.info(f"GitHub delete OK for {path}")
 
 
 # ---------------------------------------------------------
-# User + auth helpers
+# User & auth logic
 # ---------------------------------------------------------
 ACTIVE_TOKENS: Dict[str, str] = {}  # token -> username
 
@@ -217,9 +244,7 @@ def get_current_user(x_auth_token: str = Header(..., alias="x-auth-token")) -> s
     return username
 
 
-# ---------------------------------------------------------
-# Auth routes
-# ---------------------------------------------------------
+# ------------------------ AUTH ROUTES --------------------------------
 @app.post("/users/register", response_model=AuthResponse)
 def register(req: UserRegisterRequest):
     users = _load_users()
@@ -240,11 +265,11 @@ def register(req: UserRegisterRequest):
     ensure_dir(_user_root(uname))
     ensure_dir(_clients_root(uname))
 
-    # create session token
+    # session token
     token = uuid.uuid4().hex
     ACTIVE_TOKENS[token] = uname
 
-    # sync user.json to GitHub (multi-user layout)
+    # GitHub: create users/<user>/user.json
     user_doc = {
         "username": uname,
         "created_at": users[uname]["created_at"],
@@ -266,12 +291,10 @@ def login(req: UserLoginRequest):
     logger.info(f"LOGIN attempt: {uname}")
 
     if uname not in users:
-        logger.warning(f"LOGIN failed – user not found: {uname}")
         raise HTTPException(status_code=401, detail="Invalid username or password")
 
     stored = users[uname]
     if not _verify_password(req.password, stored.get("password_hash", "")):
-        logger.warning(f"LOGIN failed – bad password: {uname}")
         raise HTTPException(status_code=401, detail="Invalid username or password")
 
     stored["last_login_at"] = now_str()
@@ -290,7 +313,7 @@ def me(current_user: str = Depends(get_current_user)):
 
 
 # ---------------------------------------------------------
-# Clients (per-user, multi-broker) + GitHub sync
+# Clients (per user, multi-broker) + GitHub sync
 # ---------------------------------------------------------
 class ClientPayload(BaseModel):
     broker: str
@@ -328,13 +351,12 @@ def _add_or_update_client(username: str, payload: ClientPayload) -> Dict[str, An
 
     save_json(path, record)
 
-    # GitHub sync: users/<user>/clients/<broker>/<client>.json
+    # GitHub sync
     github_write_file(
         f"users/{username}/clients/{payload.broker}/{payload.client_id}.json",
         json.dumps(record, indent=2),
         f"Save client {payload.client_id} for {username}",
     )
-
     return record
 
 
@@ -370,7 +392,6 @@ def _list_clients(username: str) -> Dict[str, List[Dict[str, Any]]]:
                 }
             )
         result[broker] = items
-
     return result
 
 
@@ -419,9 +440,7 @@ def clients_delete(
     return {"status": "ok"}
 
 
-# ---------------------------------------------------------
-# Alias routes used by current frontend (/users/* for clients)
-# ---------------------------------------------------------
+# --------- Alias routes expected by current frontend (/users/*) ---------------
 class DeleteClientBody(BaseModel):
     broker: str
     client_id: str
@@ -512,8 +531,8 @@ def delete_group(
 class CopySetupModel(BaseModel):
     id: Optional[str] = None
     name: str
-    source_client: str   # e.g. "dhan-TRADER1"
-    group_name: str      # must match GroupModel.name
+    source_client: str   # e.g., "dhan-TRADER1"
+    group_name: str      # GroupModel.name
     multiplier: float = 1.0
     active: bool = True
 
