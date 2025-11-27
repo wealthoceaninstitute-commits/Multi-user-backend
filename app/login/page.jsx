@@ -34,7 +34,7 @@ export default function LoginPage() {
       localStorage.setItem("woi_token", data.token);
       localStorage.setItem("woi_username", data.username);
 
-      window.location.href = "/trade";
+      window.location.href = "/trader";
     } catch (err) {
       alert("Login failed");
     }
@@ -60,7 +60,7 @@ export default function LoginPage() {
       localStorage.setItem("woi_token", data.token);
       localStorage.setItem("woi_username", data.username);
 
-      window.location.href = "/trade";
+      window.location.href = "/trader";
     } catch (err) {
       alert("Registration failed");
     }
