@@ -1,395 +1,514 @@
-"""
-This module implements a simplified multi‑user router for a multi‑broker trading
-application.  It provides user registration, login and per‑user client
-management.  Client records are stored under `data/users/<username>/clients` in
-separate sub‑directories for each broker.  The module also mirrors user and
-client files to a GitHub repository (if configured) so that data is backed up.
+# MultiBroker_Router.py
+#
+# Unified backend for:
+# - User register / login / me
+# - Per-user clients (multi-broker)
+# - Groups (per user)
+# - Copy-trading setups (per user)
+#
+# Auth header: x-auth-token
+# Token is stored in localStorage as "woi_token" on frontend (recommended)
 
-Only the user‑management and client‑management portions of the full router are
-included here.  Trading, order placement and other broker functions from the
-original code base are intentionally omitted to keep this example focused on
-demonstrating per‑user storage.  Those functions can be integrated later by
-loading client credentials from the per‑user storage implemented here.
-
-The file format for each client record follows **Option 1** from the user’s
-request, which includes descriptive fields (broker, userid, display name,
-capital, credentials and session status).  All GitHub writes happen
-synchronously via the GitHub API – if the token is not set, writes are
-silently skipped.
-"""
-
+from fastapi import FastAPI, HTTPException, Depends, Header
+from fastapi.middleware.cors import CORSMiddleware
+from pydantic import BaseModel, Field
+from typing import Optional, Dict, Any, List
 import os
 import json
-import hashlib
-import secrets
-import base64
-from datetime import datetime, timedelta
-from typing import Dict, Any, Optional
+from datetime import datetime
+import uuid
 
-import requests
-from fastapi import FastAPI, HTTPException, Body, Header, Depends
-from fastapi.middleware.cors import CORSMiddleware
+APP_TITLE = "Wealth Ocean Multi-Broker Router"
+APP_VERSION = "0.2.0"
 
-# ---------------------------------------------------------------------------
-# FastAPI application setup
-# ---------------------------------------------------------------------------
-# Create the FastAPI app before declaring any routes.  If this comes later the
-# decorators will fail with `NameError: name 'app' is not defined`.
-app = FastAPI(title="Multi‑User Multi‑Broker Router (Simplified)")
+app = FastAPI(title=APP_TITLE, version=APP_VERSION)
 
-# Configure CORS so that the frontend (e.g. React/Next.js) can call our API.
-# Adjust the allowed origins as appropriate for deployment.  Here we allow
-# everything for demonstration purposes.
+# ---------------------------------------------------------------------
+# CORS – allow Next.js frontend to talk to this API
+# ---------------------------------------------------------------------
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
+    allow_origins=["*"],          # tighten later if needed
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
 )
 
-# ---------------------------------------------------------------------------
-# Configuration constants
-# ---------------------------------------------------------------------------
-# Base directory for all local data.  When deploying on Railway or another
-# container, set DATA_DIR in the environment to preserve data across restarts.
-BASE_DIR = os.path.abspath(os.environ.get("DATA_DIR", "./data"))
-# Root under BASE_DIR where user data will be stored.  Each user gets their
-# own subdirectory here containing user.json and clients/.
-USERS_ROOT = os.path.join(BASE_DIR, "users")
-os.makedirs(USERS_ROOT, exist_ok=True)
-
-# GitHub configuration.  If GITHUB_TOKEN is not set then all GitHub writes
-# become no‑ops.  The repo is expected to already exist.  Data is stored
-# relative to the root of the repository (e.g. users/<username>/...).
-GITHUB_REPO = os.environ.get("GITHUB_REPO", "wealthoceaninstitute-commits/Clients")
-GITHUB_BRANCH = os.environ.get("GITHUB_BRANCH", "main")
-GITHUB_TOKEN = os.environ.get("GITHUB_TOKEN", "")
-
-# Password hashing salt and session TTL in minutes.  These values can be
-# configured via environment variables if needed.  A salt ensures that two
-# identical passwords hash to different values when the salt changes.
-PASSWORD_SALT = os.environ.get("USER_PASSWORD_SALT", "woi_default_salt")
-SESSION_TTL_MIN = int(os.environ.get("USER_SESSION_TTL", "720"))
-
-# In‑memory session store.  Production deployments should use Redis or a
-# database.  A dictionary is sufficient for this example.  Keys are session
-# tokens and values hold the username and expiry time.
-_sessions: Dict[str, Dict[str, Any]] = {}
-
-# ---------------------------------------------------------------------------
-# Helper functions
-# ---------------------------------------------------------------------------
-
-def _safe(value: str) -> str:
-    """Return a filesystem‑safe version of the given string."""
-    return "".join(ch for ch in (value or "").strip() if ch.isalnum() or ch in ("-", "_")) or "x"
+# ---------------------------------------------------------------------
+# Basic filesystem helpers
+# ---------------------------------------------------------------------
+DATA_DIR = os.path.abspath(
+    os.getenv("DATA_DIR", os.path.join(os.path.dirname(__file__), "data"))
+)
+USERS_FILE = os.path.join(DATA_DIR, "users.json")
 
 
-def _hash_password(password: str) -> str:
-    """Hash the password using SHA‑256 and a salt."""
-    return hashlib.sha256((password + PASSWORD_SALT).encode("utf-8")).hexdigest()
+def ensure_dir(path: str) -> None:
+    os.makedirs(path, exist_ok=True)
 
 
-def _create_session(username: str) -> str:
-    """Create a new session token for the given user and store it in memory."""
-    token = secrets.token_urlsafe(32)
-    expires_at = datetime.utcnow() + timedelta(minutes=SESSION_TTL_MIN)
-    _sessions[token] = {"username": username, "expires_at": expires_at}
-    return token
-
-
-def _resolve_token(x_auth_token: Optional[str]) -> str:
-    """Validate a session token and return the associated username."""
-    if not x_auth_token or x_auth_token not in _sessions:
-        raise HTTPException(status_code=401, detail="Missing or invalid session token")
-    sess = _sessions[x_auth_token]
-    if datetime.utcnow() > sess["expires_at"]:
-        _sessions.pop(x_auth_token, None)
-        raise HTTPException(status_code=401, detail="Session expired")
-    return sess["username"]
-
-
-def get_current_user(x_auth_token: Optional[str] = Header(None)) -> str:
-    """FastAPI dependency that returns the current logged‑in username."""
-    return _resolve_token(x_auth_token)
-
-
-def _user_dir(username: str) -> str:
-    """Return the directory for the given user."""
-    return os.path.join(USERS_ROOT, _safe(username))
-
-
-def _user_json_path(username: str) -> str:
-    return os.path.join(_user_dir(username), "user.json")
-
-
-def _client_file_path(username: str, broker: str, client_id: str) -> str:
-    broker = broker.lower()
-    return os.path.join(_user_dir(username), "clients", broker, f"{_safe(client_id)}.json")
-
-
-def _ensure_user_tree(username: str) -> None:
-    """Create the folder structure for a new user locally."""
-    root = _user_dir(username)
-    os.makedirs(os.path.join(root, "clients", "dhan"), exist_ok=True)
-    os.makedirs(os.path.join(root, "clients", "motilal"), exist_ok=True)
-
-
-def _github_api_url(path: str) -> str:
-    """Construct a GitHub API URL for a repo file or folder."""
-    # Remove leading slashes and normalise path separators
-    rel_path = path.lstrip("/").replace(os.sep, "/")
-    return f"https://api.github.com/repos/{GITHUB_REPO}/contents/{rel_path}"
-
-
-def _github_headers() -> Dict[str, str]:
-    """Return headers for GitHub API requests."""
-    headers = {"Accept": "application/vnd.github+json"}
-    if GITHUB_TOKEN:
-        headers["Authorization"] = f"Bearer {GITHUB_TOKEN}"
-    return headers
-
-
-def _github_write(rel_path: str, content: str, message: str) -> None:
-    """Create or update a file in the GitHub repository."""
-    if not GITHUB_TOKEN:
-        return
-    url = _github_api_url(rel_path)
-    # Determine if the file currently exists to supply a SHA for update
-    sha = None
-    try:
-        r = requests.get(f"{url}?ref={GITHUB_BRANCH}", headers=_github_headers(), timeout=10)
-        if r.status_code == 200:
-            sha = r.json().get("sha")
-    except Exception:
-        pass
-    # Base64 encode the content as required by GitHub API
-    content_b64 = base64.b64encode(content.encode("utf-8")).decode("utf-8")
-    data: Dict[str, Any] = {
-        "message": message,
-        "content": content_b64,
-        "branch": GITHUB_BRANCH,
-    }
-    if sha:
-        data["sha"] = sha
-    try:
-        requests.put(url, headers=_github_headers(), json=data, timeout=15)
-    except Exception:
-        pass
-
-
-def _github_delete(rel_path: str, message: str) -> None:
-    """Delete a file from the GitHub repository."""
-    if not GITHUB_TOKEN:
-        return
-    url = _github_api_url(rel_path)
-    sha = None
-    try:
-        r = requests.get(f"{url}?ref={GITHUB_BRANCH}", headers=_github_headers(), timeout=10)
-        if r.status_code == 200:
-            sha = r.json().get("sha")
-    except Exception:
-        pass
-    if not sha:
-        return
-    payload = {
-        "message": message,
-        "sha": sha,
-        "branch": GITHUB_BRANCH,
-    }
-    try:
-        requests.delete(url, headers=_github_headers(), json=payload, timeout=15)
-    except Exception:
-        pass
-
-
-def _sync_user_to_github(username: str) -> None:
-    """Sync the local user.json to GitHub."""
-    local_path = _user_json_path(username)
-    if not os.path.exists(local_path):
-        return
-    with open(local_path, "r", encoding="utf-8") as f:
-        content = f.read()
-    rel_path = f"users/{_safe(username)}/user.json"
-    _github_write(rel_path, content, f"Create or update user {username}")
-
-
-def _sync_client_to_github(username: str, broker: str, client_id: str, data: Dict[str, Any]) -> None:
-    """Sync a single client JSON to GitHub."""
-    rel_path = f"users/{_safe(username)}/clients/{broker}/{_safe(client_id)}.json"
-    _github_write(rel_path, json.dumps(data, indent=2), f"Add or update client {client_id} for {username}")
-
-
-def _sync_client_delete_from_github(username: str, broker: str, client_id: str) -> None:
-    """Delete a client JSON from GitHub."""
-    rel_path = f"users/{_safe(username)}/clients/{broker}/{_safe(client_id)}.json"
-    _github_delete(rel_path, f"Delete client {client_id} for {username}")
-
-
-def _load_user(username: str) -> Optional[Dict[str, Any]]:
-    """Load the user.json document for the given user."""
-    path = _user_json_path(username)
+def load_json(path: str, default):
     if not os.path.exists(path):
-        return None
-    with open(path, "r", encoding="utf-8") as f:
-        return json.load(f)
+        return default
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            return json.load(f)
+    except Exception:
+        return default
 
 
-# ---------------------------------------------------------------------------
-# API routes for user management
-# ---------------------------------------------------------------------------
+def save_json(path: str, data) -> None:
+    ensure_dir(os.path.dirname(path))
+    tmp = path + ".tmp"
+    with open(tmp, "w", encoding="utf-8") as f:
+        json.dump(data, f, indent=2, ensure_ascii=False)
+    os.replace(tmp, path)
 
-@app.post("/users/register")
-def register_user(payload: Dict[str, Any] = Body(...)) -> Dict[str, Any]:
-    """Register a new user and return a session token."""
-    username = (payload.get("username") or "").strip()
-    password = (payload.get("password") or "").strip()
-    email = (payload.get("email") or "").strip()
-    if not username or not password:
-        raise HTTPException(status_code=400, detail="Username and password are required")
-    # Ensure user does not already exist
-    if _load_user(username):
-        raise HTTPException(status_code=400, detail="User already exists")
-    # Create folder structure
-    _ensure_user_tree(username)
-    # Create user document
-    user_doc = {
-        "username": username,
-        "email": email,
-        "password_hash": _hash_password(password),
-        "created_at": datetime.utcnow().isoformat() + "Z",
+
+def now_str() -> str:
+    return datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+
+
+# ---------------------------------------------------------------------
+# In-memory token store (simple for now)
+# ---------------------------------------------------------------------
+ACTIVE_TOKENS: Dict[str, str] = {}  # token -> username
+
+
+# ---------------------------------------------------------------------
+# User models
+# ---------------------------------------------------------------------
+class UserRegisterRequest(BaseModel):
+    username: str = Field(..., min_length=3, max_length=50)
+    password: str = Field(..., min_length=4, max_length=100)
+
+
+class UserLoginRequest(BaseModel):
+    username: str
+    password: str
+
+
+class UserResponse(BaseModel):
+    username: str
+    token: str
+
+
+def _load_users() -> Dict[str, Any]:
+    data = load_json(USERS_FILE, {})
+    if not isinstance(data, dict):
+        data = {}
+    return data
+
+
+def _save_users(data: Dict[str, Any]) -> None:
+    save_json(USERS_FILE, data)
+
+
+def _hash_password(raw: str) -> str:
+    import hashlib
+
+    return hashlib.sha256(raw.encode("utf-8")).hexdigest()
+
+
+def _verify_password(raw: str, hashed: str) -> bool:
+    return _hash_password(raw) == hashed
+
+
+def _user_root(username: str) -> str:
+    return os.path.join(DATA_DIR, "users", username)
+
+
+def _clients_root(username: str) -> str:
+    return os.path.join(_user_root(username), "clients")
+
+
+def _groups_file(username: str) -> str:
+    return os.path.join(_user_root(username), "groups.json")
+
+
+def _copy_file(username: str) -> str:
+    return os.path.join(_user_root(username), "copy_setups.json")
+
+
+# ---------------------------------------------------------------------
+# Auth dependency
+# ---------------------------------------------------------------------
+def get_current_user(x_auth_token: str = Header(..., alias="x-auth-token")) -> str:
+    """
+    Read user from x-auth-token header.
+    On frontend, store token under localStorage 'woi_token' and
+    send it as x-auth-token.
+    """
+    username = ACTIVE_TOKENS.get(x_auth_token)
+    if not username:
+        raise HTTPException(status_code=401, detail="Invalid or expired token")
+    return username
+
+
+# ---------------------------------------------------------------------
+# Auth routes – /users/register, /users/login, /users/me
+# ---------------------------------------------------------------------
+@app.post("/users/register", response_model=UserResponse)
+def register(req: UserRegisterRequest):
+    users = _load_users()
+    uname = req.username.strip()
+    if uname in users:
+        raise HTTPException(status_code=400, detail="Username already exists")
+
+    users[uname] = {
+        "password_hash": _hash_password(req.password),
+        "created_at": now_str(),
+        "updated_at": now_str(),
     }
-    # Save locally
-    with open(_user_json_path(username), "w", encoding="utf-8") as f:
-        json.dump(user_doc, f, indent=2)
-    # Sync to GitHub
-    _sync_user_to_github(username)
-    # Create session token and return
-    token = _create_session(username)
-    return {"success": True, "username": username, "token": token}
+    _save_users(users)
+
+    # Ensure user folders
+    user_root = _user_root(uname)
+    ensure_dir(user_root)
+    ensure_dir(_clients_root(uname))
+
+    # Auto-login
+    token = uuid.uuid4().hex
+    ACTIVE_TOKENS[token] = uname
+
+    return UserResponse(username=uname, token=token)
 
 
-@app.post("/users/login")
-def login_user(payload: Dict[str, Any] = Body(...)) -> Dict[str, Any]:
-    """Authenticate a user and return a session token."""
-    username = (payload.get("username") or "").strip()
-    password = (payload.get("password") or "").strip()
-    user_doc = _load_user(username)
-    if not user_doc:
-        raise HTTPException(status_code=400, detail="User not found")
-    if user_doc.get("password_hash") != _hash_password(password):
-        raise HTTPException(status_code=400, detail="Invalid password")
-    token = _create_session(username)
-    return {"success": True, "username": username, "token": token}
+@app.post("/users/login", response_model=UserResponse)
+def login(req: UserLoginRequest):
+    users = _load_users()
+    uname = req.username.strip()
+
+    if uname not in users:
+        raise HTTPException(status_code=401, detail="Invalid username or password")
+
+    stored = users[uname]
+    if not _verify_password(req.password, stored.get("password_hash", "")):
+        raise HTTPException(status_code=401, detail="Invalid username or password")
+
+    stored["last_login_at"] = now_str()
+    _save_users(users)
+
+    token = uuid.uuid4().hex
+    ACTIVE_TOKENS[token] = uname
+
+    return UserResponse(username=uname, token=token)
 
 
 @app.get("/users/me")
-def get_me(current_user: str = Depends(get_current_user)) -> Dict[str, Any]:
-    """Return the current authenticated user."""
+def me(current_user: str = Depends(get_current_user)):
     return {"username": current_user}
 
 
-# ---------------------------------------------------------------------------
-# API routes for client management
-# ---------------------------------------------------------------------------
+# ---------------------------------------------------------------------
+# Clients (Per-user, multi-broker)
+# ---------------------------------------------------------------------
+class ClientPayload(BaseModel):
+    broker: str
+    client_id: str
+    display_name: Optional[str] = None
+    capital: Optional[float] = None
+    creds: Dict[str, Any]
 
-@app.post("/clients/add")
-def add_client(payload: Dict[str, Any] = Body(...), current_user: str = Depends(get_current_user)) -> Dict[str, Any]:
-    """
-    Add a new client for the current user.  The payload should include:
-      - broker: "dhan" or "motilal"
-      - client_id: client login/identifier
-      - name/display_name: human friendly name
-      - capital: numeric or string value
-      - creds: dictionary with broker‑specific credentials (e.g. API keys)
-      - session_active: boolean (optional)
 
-    Returns the saved client record.
-    """
-    broker = (payload.get("broker") or "").lower()
-    if broker not in {"dhan", "motilal"}:
-        raise HTTPException(status_code=400, detail="Broker must be 'dhan' or 'motilal'")
-    client_id = (payload.get("client_id") or payload.get("userid") or "").strip()
-    if not client_id:
-        raise HTTPException(status_code=400, detail="client_id is required")
-    name = (payload.get("name") or payload.get("display_name") or client_id).strip()
-    capital = payload.get("capital", "")
-    creds = payload.get("creds", {})
-    session_active = bool(payload.get("session_active", False))
-    # Construct client document according to Option 1 format
-    doc: Dict[str, Any] = {
-        "broker": broker,
-        "userid": client_id,
-        "display_name": name,
-        "capital": capital,
-        "creds": creds,
-        "session_active": session_active,
-        "created_at": datetime.utcnow().isoformat() + "Z",
-        "updated_at": datetime.utcnow().isoformat() + "Z",
+def _client_path(username: str, broker: str, client_id: str) -> str:
+    safe_broker = broker.replace("/", "_")
+    safe_client = client_id.replace("/", "_")
+    return os.path.join(_clients_root(username), safe_broker, f"{safe_client}.json")
+
+
+def _add_or_update_client(username: str, payload: ClientPayload) -> Dict[str, Any]:
+    path = _client_path(username, payload.broker, payload.client_id)
+    ensure_dir(os.path.dirname(path))
+
+    record = {
+        "broker": payload.broker,
+        "client_id": payload.client_id,
+        "display_name": payload.display_name or payload.client_id,
+        "capital": payload.capital,
+        "creds": payload.creds,
+        "updated_at": now_str(),
     }
-    # Determine file path and save locally
-    path = _client_file_path(current_user, broker, client_id)
-    os.makedirs(os.path.dirname(path), exist_ok=True)
-    with open(path, "w", encoding="utf-8") as f:
-        json.dump(doc, f, indent=2)
-    # Sync to GitHub
-    _sync_client_to_github(current_user, broker, client_id, doc)
-    return {"success": True, "client": doc}
+
+    if not os.path.exists(path):
+        record["created_at"] = now_str()
+    else:
+        # preserve original created_at if exists
+        existing = load_json(path, {})
+        if "created_at" in existing:
+            record["created_at"] = existing["created_at"]
+
+    save_json(path, record)
+    return record
 
 
-@app.get("/clients/list")
-def list_clients(current_user: str = Depends(get_current_user)) -> Dict[str, Any]:
-    """Return all clients for the current user grouped by broker."""
-    result: Dict[str, Any] = {"dhan": [], "motilal": []}
-    for broker in ["dhan", "motilal"]:
-        broker_dir = os.path.join(_user_dir(current_user), "clients", broker)
+def _list_clients(username: str) -> Dict[str, List[Dict[str, Any]]]:
+    root = _clients_root(username)
+    result: Dict[str, List[Dict[str, Any]]] = {}
+
+    if not os.path.isdir(root):
+        return result
+
+    for broker in os.listdir(root):
+        broker_dir = os.path.join(root, broker)
         if not os.path.isdir(broker_dir):
             continue
+
+        items: List[Dict[str, Any]] = []
         for fname in os.listdir(broker_dir):
-            if fname.lower().endswith(".json"):
-                try:
-                    with open(os.path.join(broker_dir, fname), "r", encoding="utf-8") as f:
-                        record = json.load(f)
-                    result[broker].append(record)
-                except Exception:
-                    pass
+            if not fname.endswith(".json"):
+                continue
+
+            fpath = os.path.join(broker_dir, fname)
+            data = load_json(fpath, {})
+            if not data:
+                continue
+
+            items.append(
+                {
+                    "broker": broker,
+                    "client_id": data.get("client_id"),
+                    "display_name": data.get("display_name") or data.get("client_id"),
+                    "capital": data.get("capital"),
+                    "created_at": data.get("created_at"),
+                    "updated_at": data.get("updated_at"),
+                }
+            )
+        result[broker] = items
+
     return result
 
 
-@app.get("/clients/get/{broker}/{client_id}")
-def get_client(broker: str, client_id: str, current_user: str = Depends(get_current_user)) -> Dict[str, Any]:
-    """Retrieve a single client record."""
-    broker = broker.lower()
-    if broker not in {"dhan", "motilal"}:
-        raise HTTPException(status_code=400, detail="Invalid broker")
-    path = _client_file_path(current_user, broker, client_id)
+def _delete_client(username: str, broker: str, client_id: str) -> None:
+    path = _client_path(username, broker, client_id)
     if not os.path.exists(path):
         raise HTTPException(status_code=404, detail="Client not found")
-    with open(path, "r", encoding="utf-8") as f:
-        return json.load(f)
+    os.remove(path)
+
+
+# --- Core clients routes -------------------------------------------------------
+@app.post("/clients/add")
+def clients_add(
+    payload: ClientPayload, current_user: str = Depends(get_current_user)
+):
+    record = _add_or_update_client(current_user, payload)
+    return {"status": "ok", "client": record}
+
+
+@app.get("/clients/list")
+def clients_list(current_user: str = Depends(get_current_user)):
+    return {"status": "ok", "clients": _list_clients(current_user)}
+
+
+@app.get("/clients/get/{broker}/{client_id}")
+def clients_get(
+    broker: str, client_id: str, current_user: str = Depends(get_current_user)
+):
+    path = _client_path(current_user, broker, client_id)
+    if not os.path.exists(path):
+        raise HTTPException(status_code=404, detail="Client not found")
+    data = load_json(path, {})
+    return {"status": "ok", "client": data}
 
 
 @app.delete("/clients/delete/{broker}/{client_id}")
-def delete_client(broker: str, client_id: str, current_user: str = Depends(get_current_user)) -> Dict[str, Any]:
-    """Delete a client record for the current user."""
-    broker = broker.lower()
-    path = _client_file_path(current_user, broker, client_id)
-    if not os.path.exists(path):
-        raise HTTPException(status_code=404, detail="Client not found")
-    # Delete locally
-    os.remove(path)
-    # Delete from GitHub
-    _sync_client_delete_from_github(current_user, broker, client_id)
-    return {"success": True, "deleted": client_id}
+def clients_delete(
+    broker: str, client_id: str, current_user: str = Depends(get_current_user)
+):
+    _delete_client(current_user, broker, client_id)
+    return {"status": "ok"}
 
 
-# ---------------------------------------------------------------------------
-# Placeholder for trading functions
-# ---------------------------------------------------------------------------
-# The original code includes complex logic for placing orders, editing clients,
-# computing positions and holdings, and dispatching to multiple brokers.  To
-# integrate those features with per‑user storage, modify each function to
-# resolve the current user via `get_current_user` and load the client record
-# using `_client_file_path(current_user, broker, client_id)`.  Then pass the
-# credentials from the loaded JSON into the appropriate broker API calls.
+# --- Alias routes to match existing frontend: /users/* -------------------------
+class DeleteClientBody(BaseModel):
+    broker: str
+    client_id: str
+
+
+# list clients (used by TradeForm.jsx / Clients.jsx)
+@app.get("/users/clients")
+@app.get("/users/get_clients")
+def users_clients(current_user: str = Depends(get_current_user)):
+    return {"status": "ok", "clients": _list_clients(current_user)}
+
+
+# add client
+@app.post("/users/add_client")
+def users_add_client(
+    payload: ClientPayload, current_user: str = Depends(get_current_user)
+):
+    record = _add_or_update_client(current_user, payload)
+    return {"status": "ok", "client": record}
+
+
+# edit client (same as add, but overwrites)
+@app.post("/users/edit_client")
+def users_edit_client(
+    payload: ClientPayload, current_user: str = Depends(get_current_user)
+):
+    record = _add_or_update_client(current_user, payload)
+    return {"status": "ok", "client": record}
+
+
+# delete client (for POST with JSON body)
+@app.post("/users/delete_client")
+def users_delete_client(
+    body: DeleteClientBody, current_user: str = Depends(get_current_user)
+):
+    _delete_client(current_user, body.broker, body.client_id)
+    return {"status": "ok"}
+
+
+# ---------------------------------------------------------------------
+# Groups (per user)
+# ---------------------------------------------------------------------
+class GroupModel(BaseModel):
+    name: str
+    description: Optional[str] = None
+    # client keys like "dhan-AB123", "motilal-MO123"
+    clients: List[str] = []
+
+
+def _load_groups(username: str) -> List[Dict[str, Any]]:
+    return load_json(_groups_file(username), [])
+
+
+def _save_groups(username: str, groups: List[Dict[str, Any]]) -> None:
+    save_json(_groups_file(username), groups)
+
+
+@app.get("/users/groups")
+def get_groups(current_user: str = Depends(get_current_user)):
+    """
+    Returns all groups for the logged-in user.
+    """
+    return {"status": "ok", "groups": _load_groups(current_user)}
+
+
+@app.post("/users/groups/save")
+def save_group(group: GroupModel, current_user: str = Depends(get_current_user)):
+    """
+    Create or update a group.
+    If group.name exists, it is updated; otherwise, it is added.
+    """
+    groups = _load_groups(current_user)
+    for g in groups:
+        if g.get("name") == group.name:
+            g.update(group.dict())
+            break
+    else:
+        groups.append(group.dict())
+
+    _save_groups(current_user, groups)
+    return {"status": "ok", "groups": groups}
+
+
+class GroupDeleteBody(BaseModel):
+    name: str
+
+
+@app.post("/users/groups/delete")
+def delete_group(
+    body: GroupDeleteBody, current_user: str = Depends(get_current_user)
+):
+    groups = _load_groups(current_user)
+    new_groups = [g for g in groups if g.get("name") != body.name]
+    _save_groups(current_user, new_groups)
+    return {"status": "ok", "groups": new_groups}
+
+
+# ---------------------------------------------------------------------
+# Copy-trading setups (per user)
+# ---------------------------------------------------------------------
+class CopySetupModel(BaseModel):
+    id: Optional[str] = None
+    name: str
+    source_client: str   # e.g. "dhan-TRADER1"
+    group_name: str      # must match GroupModel.name
+    multiplier: float = 1.0
+    active: bool = True
+
+
+def _load_copy_setups(username: str) -> List[Dict[str, Any]]:
+    return load_json(_copy_file(username), [])
+
+
+def _save_copy_setups(username: str, setups: List[Dict[str, Any]]) -> None:
+    save_json(_copy_file(username), setups)
+
+
+@app.get("/users/copy/setups")
+def get_copy_setups(current_user: str = Depends(get_current_user)):
+    """
+    List all copy-trading setups for this user.
+    """
+    return {"status": "ok", "setups": _load_copy_setups(current_user)}
+
+
+@app.post("/users/copy/save")
+def save_copy_setup(
+    setup: CopySetupModel, current_user: str = Depends(get_current_user)
+):
+    """
+    Create or update a copy-trading setup.
+    - If setup.id is None → create new (generate id)
+    - Else → update existing
+    """
+    setups = _load_copy_setups(current_user)
+
+    if setup.id is None:
+        setup.id = uuid.uuid4().hex
+        setups.append(setup.dict())
+    else:
+        for s in setups:
+            if s.get("id") == setup.id:
+                s.update(setup.dict())
+                break
+        else:
+            setups.append(setup.dict())
+
+    _save_copy_setups(current_user, setups)
+    return {"status": "ok", "setups": setups}
+
+
+class CopyIdBody(BaseModel):
+    id: str
+
+
+@app.post("/users/copy/enable")
+def enable_copy(body: CopyIdBody, current_user: str = Depends(get_current_user)):
+    setups = _load_copy_setups(current_user)
+    for s in setups:
+        if s.get("id") == body.id:
+            s["active"] = True
+            break
+    _save_copy_setups(current_user, setups)
+    return {"status": "ok", "setups": setups}
+
+
+@app.post("/users/copy/disable")
+def disable_copy(body: CopyIdBody, current_user: str = Depends(get_current_user)):
+    setups = _load_copy_setups(current_user)
+    for s in setups:
+        if s.get("id") == body.id:
+            s["active"] = False
+            break
+    _save_copy_setups(current_user, setups)
+    return {"status": "ok", "setups": setups}
+
+
+@app.post("/users/copy/delete")
+def delete_copy(body: CopyIdBody, current_user: str = Depends(get_current_user)):
+    setups = _load_copy_setups(current_user)
+    setups = [s for s in setups if s.get("id") != body.id]
+    _save_copy_setups(current_user, setups)
+    return {"status": "ok", "setups": setups}
+
+
+# ---------------------------------------------------------------------
+# Local dev entry-point
+# ---------------------------------------------------------------------
+if __name__ == "__main__":
+    import uvicorn
+
+    uvicorn.run("MultiBroker_Router:app", host="0.0.0.0", port=8000, reload=True)
