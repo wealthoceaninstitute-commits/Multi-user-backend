@@ -5,6 +5,15 @@ import { useRouter } from "next/navigation";
 import { Container, Tabs, Tab, Button } from "react-bootstrap";
 import { getCurrentUser, clearCurrentUser } from "../../src/lib/userSession";
 
+// Import your components (if you already have them)
+import TradeForm from "../../src/components/TradeForm";
+import Orders from "../../src/components/Orders";
+import Positions from "../../src/components/Positions";
+import Holdings from "../../src/components/Holdings";
+import Summary from "../../src/components/Summary";
+import Clients from "../../src/components/Clients";
+import CopyTrading from "../../src/components/CopyTrading";
+
 export default function TraderPage() {
   const router = useRouter();
   const [activeTab, setActiveTab] = useState("trade");
@@ -13,7 +22,6 @@ export default function TraderPage() {
   useEffect(() => {
     const user = getCurrentUser();
     if (!user || !user.username) {
-      // Not logged in → send to login ONCE
       router.replace("/login");
     } else {
       setUsername(user.username);
@@ -27,44 +35,48 @@ export default function TraderPage() {
 
   return (
     <Container fluid className="mt-3">
-      <header className="d-flex justify-content-between align-items-center mb-3">
-        <h1>Wealth Ocean – Multi-Broker Trader</h1>
+      <div className="d-flex justify-content-between align-items-center mb-3">
+        <h4>Wealth Ocean – Multi Broker Dashboard</h4>
         <div>
-          Logged in as <strong>{username}</strong>{" "}
-          <Button variant="outline-secondary" size="sm" onClick={handleLogout}>
+          <strong>{username}</strong>{" "}
+          <Button size="sm" variant="outline-danger" onClick={handleLogout}>
             Logout
           </Button>
         </div>
-      </header>
+      </div>
 
       <Tabs
-        id="trader-tabs"
         activeKey={activeTab}
-        onSelect={(key) => key && setActiveTab(key)}
+        onSelect={(k) => setActiveTab(k)}
         className="mb-3"
         justify
       >
         <Tab eventKey="trade" title="Trade">
-          {/* Put your existing TradeForm component here */}
-          <div>Trade form goes here</div>
+          <TradeForm />
         </Tab>
+
         <Tab eventKey="orders" title="Orders">
-          <div>Orders view goes here</div>
+          <Orders />
         </Tab>
+
         <Tab eventKey="positions" title="Positions">
-          <div>Positions view goes here</div>
+          <Positions />
         </Tab>
+
         <Tab eventKey="holdings" title="Holdings">
-          <div>Holdings view goes here</div>
+          <Holdings />
         </Tab>
+
         <Tab eventKey="summary" title="Summary">
-          <div>Summary view goes here</div>
+          <Summary />
         </Tab>
+
         <Tab eventKey="clients" title="Clients">
-          <div>Clients view goes here</div>
+          <Clients />
         </Tab>
+
         <Tab eventKey="copy" title="Copy Trading">
-          <div>Copy trading view goes here</div>
+          <CopyTrading />
         </Tab>
       </Tabs>
     </Container>
