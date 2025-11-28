@@ -9,19 +9,28 @@ export default function Signup() {
   const router = useRouter();
 
   async function signup() {
-    const res = await fetch("https://multibrokertradermultiuser-production-f735.up.railway.app/signup",{
-      method:"POST",
-      headers:{"Content-Type":"application/json"},
-      body: JSON.stringify({name,email,password})
-    });
+    try {
+      const res = await fetch(
+        "https://multibrokertradermultiuser-production-f735.up.railway.app/users/register",
+        {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ name, email, password })
+        }
+      );
 
-    const data = await res.json();
+      const data = await res.json();
 
-    if(data.status === "success"){
-      alert("✅ User Created Successfully");
-      router.push("/login");
-    } else {
-      alert(data.message);
+      if (data.success) {
+        alert("✅ User Created Successfully");
+        router.push("/login");
+      } else {
+        alert(data.detail || "❌ Error creating user");
+      }
+
+    } catch (error) {
+      alert("❌ Server not reachable");
+      console.error(error);
     }
   }
 
@@ -35,7 +44,7 @@ export default function Signup() {
     }}>
 
       <div style={{
-        width:350,
+        width:370,
         background:"white",
         padding:30,
         borderRadius:12,
@@ -43,7 +52,7 @@ export default function Signup() {
         textAlign:"center"
       }}>
 
-        <h2 style={{marginBottom:20}}>Create User</h2>
+        <h2 style={{marginBottom:20, fontSize:24}}>Create User</h2>
 
         <input
           style={inputStyle}
@@ -65,10 +74,7 @@ export default function Signup() {
           onChange={e=>setPassword(e.target.value)}
         />
 
-        <button 
-          style={btnStyle}
-          onClick={signup}
-        >
+        <button style={btnStyle} onClick={signup}>
           Create Account
         </button>
 
@@ -102,5 +108,6 @@ const btnStyle = {
   border:"none",
   borderRadius:8,
   cursor:"pointer",
-  fontWeight:"bold"
+  fontWeight:"bold",
+  fontSize:15
 }
