@@ -2,14 +2,14 @@
 
 import { useState } from "react";
 
-// Import your existing components
-import TradeForm from "@/components/TradeForm";
-import Orders from "@/components/Orders";
-import Positions from "@/components/Positions";
-import Holdings from "@/components/Holdings";
-import Summary from "@/components/Summary";
-import Clients from "@/components/Clients";
-import CopyTrading from "@/components/CopyTrading";
+// 🔴 FIXED IMPORT PATHS
+import TradeForm from "../../components/TradeForm";
+import Orders from "../../components/Orders";
+import Positions from "../../components/Positions";
+import Holdings from "../../components/Holdings";
+import Summary from "../../components/Summary";
+import Clients from "../../components/Clients";
+import CopyTrading from "../../components/CopyTrading";
 
 export default function TradePage() {
   const [activeTab, setActiveTab] = useState("trade");
@@ -63,7 +63,6 @@ export default function TradePage() {
           Copy Trading
         </span>
       </div>
-
 
       {/* CONTENT AREA */}
       <div>
