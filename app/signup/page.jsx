@@ -1,79 +1,77 @@
 "use client";
+
 import { useState } from "react";
 import { useRouter } from "next/navigation";
 
-export default function Signup() {
-  const [username, setUsername] = useState("");
-  const [email, setEmail]       = useState("");
-  const [password, setPassword] = useState("");
+// Uses Railway environment variable
+const API_BASE = process.env.NEXT_PUBLIC_API_BASE;
 
+export default function Signup() {
   const router = useRouter();
 
-  const API_BASE = process.env.NEXT_PUBLIC_API_BASE;
+  const [name, setName] = useState("");
+  const [email, setEmail] = useState("");
+  const [password, setPassword] = useState("");
 
-  async function signup() {
-    if (!username || !email || !password) {
-      alert("Please fill all fields");
+  const [loading, setLoading] = useState(false);
+
+  const signup = async () => {
+    if (!name || !email || !password) {
+      alert("All fields are required");
       return;
     }
+
+    setLoading(true);
 
     try {
       const res = await fetch(`${API_BASE}/users/register`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
+
+        // BACKEND MAPPING:
+        // email -> username inside backend
         body: JSON.stringify({
-          username,   // ✅ FIXED
-          email,
-          password,
-        }),
+          username: email.toLowerCase(),
+          name: name,
+          email: email.toLowerCase(),
+          password: password
+        })
       });
 
       const data = await res.json();
 
-      console.log("Signup response:", data);
-
-      if (res.ok) {
-        alert("✅ User Created Successfully");
-        router.push("/login");
-      } else {
-        alert(data.detail || data.message || "Signup failed");
+      if (!res.ok) {
+        alert(data?.detail || data?.message || "Signup failed");
+        setLoading(false);
+        return;
       }
+
+      alert("✅ User Created Successfully");
+      router.push("/login");
 
     } catch (err) {
       console.error(err);
-      alert("Server not reachable");
+      alert("Server not reachable. Check backend.");
     }
-  }
+
+    setLoading(false);
+  };
 
   return (
-    <div style={{
-      display: "flex",
-      justifyContent: "center",
-      alignItems: "center",
-      height: "100vh",
-      background: "linear-gradient(135deg, #0f172a, #1e3a8a)"
-    }}>
+    <div style={styles.page}>
 
-      <div style={{
-        width: 360,
-        background: "white",
-        padding: 32,
-        borderRadius: 14,
-        boxShadow: "0 20px 40px rgba(0,0,0,0.35)",
-        textAlign: "center"
-      }}>
-
-        <h2 style={{ marginBottom: 22 }}>Create User</h2>
+      <div style={styles.card}>
+        <h2 style={{ marginBottom: 25 }}>Create User</h2>
 
         <input
-          style={inputStyle}
-          placeholder="Username"
-          value={username}
-          onChange={e => setUsername(e.target.value)}
+          style={styles.input}
+          placeholder="Full Name"
+          value={name}
+          onChange={e => setName(e.target.value)}
         />
 
         <input
-          style={inputStyle}
+          style={styles.input}
           placeholder="Email"
           type="email"
           value={email}
@@ -81,19 +79,23 @@ export default function Signup() {
         />
 
         <input
-          style={inputStyle}
+          style={styles.input}
           placeholder="Password"
           type="password"
           value={password}
           onChange={e => setPassword(e.target.value)}
         />
 
-        <button style={btnStyle} onClick={signup}>
-          Create Account
+        <button
+          style={styles.button}
+          onClick={signup}
+          disabled={loading}
+        >
+          {loading ? "Creating..." : "Create Account"}
         </button>
 
         <p
-          style={{ marginTop: 16, cursor: "pointer", color: "#1e40af" }}
+          style={styles.loginLink}
           onClick={() => router.push("/login")}
         >
           Already have account? Login
@@ -104,24 +106,50 @@ export default function Signup() {
   );
 }
 
-const inputStyle = {
-  width: "100%",
-  padding: "12px",
-  marginBottom: 16,
-  borderRadius: 8,
-  border: "1px solid #d1d5db",
-  outline: "none",
-  fontSize: 14
-};
+const styles = {
+  page: {
+    display: "flex",
+    justifyContent: "center",
+    alignItems: "center",
+    height: "100vh",
+    background: "linear-gradient(135deg, #0f172a, #1e3a8a)"
+  },
 
-const btnStyle = {
-  width: "100%",
-  padding: "12px",
-  background: "#1e40af",
-  color: "white",
-  border: "none",
-  borderRadius: 8,
-  cursor: "pointer",
-  fontWeight: "600",
-  fontSize: 15
+  card: {
+    width: 350,
+    background: "white",
+    padding: 30,
+    borderRadius: 12,
+    boxShadow: "0 20px 40px rgba(0,0,0,0.3)",
+    textAlign: "center"
+  },
+
+  input: {
+    width: "100%",
+    padding: "12px",
+    marginBottom: 15,
+    borderRadius: 8,
+    border: "1px solid #ccc",
+    outline: "none",
+    fontSize: 14
+  },
+
+  button: {
+    width: "100%",
+    padding: "12px",
+    background: "#1e40af",
+    color: "white",
+    border: "none",
+    borderRadius: 8,
+    cursor: "pointer",
+    fontWeight: "bold",
+    fontSize: "15px"
+  },
+
+  loginLink: {
+    marginTop: 15,
+    cursor: "pointer",
+    color: "#1e40af",
+    fontSize: "14px"
+  }
 };
