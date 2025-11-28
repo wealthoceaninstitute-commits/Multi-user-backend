@@ -10,7 +10,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
 
 APP_TITLE = "Wealth Ocean Multi-Broker Router"
-APP_VERSION = "0.6.2"
+APP_VERSION = "0.6.1"
 
 logger = logging.getLogger("uvicorn.error")
 
@@ -231,9 +231,6 @@ class AuthResponse(BaseModel):
     success: bool = True
     username: str
     token: str
-    authToken: str
-    status: str = "ok"
-    message: Optional[str] = None
 
 
 def _hash_password(raw: str) -> str:
@@ -335,14 +332,7 @@ def register(req: UserRegisterRequest):
     )
 
     logger.info(f"REGISTER success for {uname}")
-    return AuthResponse(
-        success=True,
-        username=uname,
-        token=token,
-        authToken=token,
-        status="ok",
-        message="User registered",
-    )
+    return AuthResponse(success=True, username=uname, token=token)
 
 
 @app.post("/users/login", response_model=AuthResponse)
@@ -366,14 +356,7 @@ def login(req: UserLoginRequest):
     ACTIVE_TOKENS[token] = uname
     logger.info(f"LOGIN success for {uname}")
 
-    return AuthResponse(
-        success=True,
-        username=uname,
-        token=token,
-        authToken=token,
-        status="ok",
-        message="Login successful",
-    )
+    return AuthResponse(success=True, username=uname, token=token)
 
 
 @app.get("/users/me")
