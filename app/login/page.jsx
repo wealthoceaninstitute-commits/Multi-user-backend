@@ -3,6 +3,8 @@
 import { useState } from "react";
 import { useRouter } from "next/navigation";
 
+const API_BASE = process.env.NEXT_PUBLIC_API_URL;
+
 export default function LoginPage() {
   const router = useRouter();
 
@@ -10,35 +12,21 @@ export default function LoginPage() {
   const [password, setPassword] = useState("");
   const [loading, setLoading] = useState(false);
 
-  // ✅ Backend base URL
-  const API_BASE = process.env.NEXT_PUBLIC_API_BASE || "https://multibrokertradermultiuser-production-f735.up.railway.app";
-
   const handleLogin = async (e) => {
     e.preventDefault();
-
-    if (!email || !password) {
-      alert("Please enter Email and Password");
-      return;
-    }
-
     setLoading(true);
 
     try {
       const res = await fetch(`${API_BASE}/users/login`, {
         method: "POST",
-        headers: {
-          "Content-Type": "application/json"
-        },
-        body: JSON.stringify({
-          email: email.trim().toLowerCase(),
-          password: password
-        })
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ email, password }),
       });
 
       const data = await res.json();
 
       if (!res.ok) {
-        alert(data.detail || "Login failed");
+        alert(data?.detail || "Login failed");
         setLoading(false);
         return;
       }
@@ -49,94 +37,61 @@ export default function LoginPage() {
 
       alert("✅ Login Successful");
 
-      // ✅ Go to trading page
-      router.push("/");
+      // ✅ Redirect TO TRADE PAGE
+      router.push("/trade");
 
     } catch (err) {
       console.error(err);
       alert("Server not reachable");
-    } finally {
-      setLoading(false);
     }
+
+    setLoading(false);
   };
 
   return (
-    <div
-      style={{
-        minHeight: "100vh",
-        background: "radial-gradient(circle at top, #162447 0%, #0f172a 80%)",
-        display: "flex",
-        alignItems: "center",
-        justifyContent: "center"
-      }}
-    >
-      <div
-        style={{
-          background: "white",
-          padding: "40px",
-          borderRadius: "14px",
-          width: "400px",
-          boxShadow: "0 25px 50px rgba(0,0,0,0.25)",
-          textAlign: "center"
-        }}
+    <div className="min-h-screen flex items-center justify-center bg-gradient-to-br from-[#0a1328] to-[#0f2458]">
+      <form
+        onSubmit={handleLogin}
+        className="bg-white p-8 rounded-xl shadow-xl w-[380px]"
       >
-        <h1 style={{ marginBottom: "30px" }}>Login</h1>
+        <h1 className="text-3xl font-semibold mb-6 text-center">Login</h1>
 
-        <form onSubmit={handleLogin}>
-          <input
-            type="email"
-            placeholder="Email"
-            value={email}
-            onChange={(e) => setEmail(e.target.value)}
-            style={inputStyle}
-          />
+        <input
+          type="email"
+          placeholder="Email"
+          className="w-full p-3 border rounded mb-4"
+          value={email}
+          onChange={(e) => setEmail(e.target.value)}
+          required
+        />
 
-          <input
-            type="password"
-            placeholder="Password"
-            value={password}
-            onChange={(e) => setPassword(e.target.value)}
-            style={inputStyle}
-          />
+        <input
+          type="password"
+          placeholder="Password"
+          className="w-full p-3 border rounded mb-6"
+          value={password}
+          onChange={(e) => setPassword(e.target.value)}
+          required
+        />
 
-          <button
-            type="submit"
-            disabled={loading}
-            style={{
-              width: "100%",
-              padding: "12px",
-              background: "#1e40af",
-              color: "white",
-              border: "none",
-              borderRadius: "8px",
-              fontWeight: "600",
-              cursor: "pointer",
-              marginTop: "10px"
-            }}
-          >
-            {loading ? "Logging in..." : "Login"}
-          </button>
-        </form>
+        <button
+          type="submit"
+          className="w-full bg-blue-600 text-white py-3 rounded hover:bg-blue-700 transition"
+          disabled={loading}
+        >
+          {loading ? "Logging in..." : "Login"}
+        </button>
 
-        <p style={{ marginTop: "20px", fontSize: "14px" }}>
+        <p className="text-center mt-4">
           Don’t have an account?{" "}
           <span
             onClick={() => router.push("/signup")}
-            style={{ color: "#1e40af", cursor: "pointer" }}
+            className="text-blue-500 cursor-pointer"
           >
             Create new account
           </span>
         </p>
-      </div>
+      </form>
     </div>
   );
 }
-
-const inputStyle = {
-  width: "100%",
-  padding: "12px",
-  marginBottom: "15px",
-  border: "1px solid #d1d5db",
-  borderRadius: "8px",
-  fontSize: "15px"
-};
