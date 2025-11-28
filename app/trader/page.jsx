@@ -1,80 +1,72 @@
 "use client";
 
-import React, { useEffect, useState } from "react";
+import { useEffect, useState } from "react";
 import { useRouter } from "next/navigation";
-import { clearCurrentUser, getCurrentUser } from "../../src/lib/userSession";
-import Tabs from "../../src/components/Tabs";
+import { Container, Tabs, Tab, Button } from "react-bootstrap";
+import { getCurrentUser, clearCurrentUser } from "../../src/lib/userSession";
 
 export default function TraderPage() {
   const router = useRouter();
-  const [user, setUser] = useState(null);
-  const [checking, setChecking] = useState(true); // ✅ prevents flicker loop
+  const [activeTab, setActiveTab] = useState("trade");
+  const [username, setUsername] = useState("");
 
   useEffect(() => {
-    // Wait for client side before checking
-    if (typeof window === "undefined") return;
-
-    const username = getCurrentUser();
-    const token = localStorage.getItem("token");
-
-    if (!username || !token) {
+    const user = getCurrentUser();
+    if (!user || !user.username) {
+      // Not logged in → send to login ONCE
       router.replace("/login");
     } else {
-      setUser(username);
+      setUsername(user.username);
     }
-
-    setChecking(false);
   }, [router]);
 
   const handleLogout = () => {
     clearCurrentUser();
-    localStorage.removeItem("token");
-    localStorage.removeItem("username");
-    router.push("/login");
+    router.replace("/login");
   };
 
-  if (checking) {
-    return (
-      <div
-        style={{
-          minHeight: "100vh",
-          display: "flex",
-          alignItems: "center",
-          justifyContent: "center",
-          background: "#f9fafb",
-        }}
-      >
-        <p style={{ color: "#64748b" }}>Loading...</p>
-      </div>
-    );
-  }
-
-  if (!user) return null; // nothing till verified
-
   return (
-    <div style={{ padding: "20px" }}>
-      <h1 style={{ textAlign: "center", marginBottom: "10px" }}>
-        Wealth Ocean – Multi-Broker Trader
-      </h1>
-      <div style={{ textAlign: "right", marginBottom: "10px" }}>
-        <span style={{ marginRight: "8px", color: "#475569" }}>
-          Logged in as <b>{user}</b>
-        </span>
-        <button
-          onClick={handleLogout}
-          style={{
-            border: "1px solid #cbd5e1",
-            padding: "4px 8px",
-            borderRadius: "6px",
-            cursor: "pointer",
-            background: "#fff",
-          }}
-        >
-          Logout
-        </button>
-      </div>
+    <Container fluid className="mt-3">
+      <header className="d-flex justify-content-between align-items-center mb-3">
+        <h1>Wealth Ocean – Multi-Broker Trader</h1>
+        <div>
+          Logged in as <strong>{username}</strong>{" "}
+          <Button variant="outline-secondary" size="sm" onClick={handleLogout}>
+            Logout
+          </Button>
+        </div>
+      </header>
 
-      <Tabs />
-    </div>
+      <Tabs
+        id="trader-tabs"
+        activeKey={activeTab}
+        onSelect={(key) => key && setActiveTab(key)}
+        className="mb-3"
+        justify
+      >
+        <Tab eventKey="trade" title="Trade">
+          {/* Put your existing TradeForm component here */}
+          <div>Trade form goes here</div>
+        </Tab>
+        <Tab eventKey="orders" title="Orders">
+          <div>Orders view goes here</div>
+        </Tab>
+        <Tab eventKey="positions" title="Positions">
+          <div>Positions view goes here</div>
+        </Tab>
+        <Tab eventKey="holdings" title="Holdings">
+          <div>Holdings view goes here</div>
+        </Tab>
+        <Tab eventKey="summary" title="Summary">
+          <div>Summary view goes here</div>
+        </Tab>
+        <Tab eventKey="clients" title="Clients">
+          <div>Clients view goes here</div>
+        </Tab>
+        <Tab eventKey="copy" title="Copy Trading">
+          <div>Copy trading view goes here</div>
+        </Tab>
+      </Tabs>
+    </Container>
   );
 }
