@@ -2,6 +2,8 @@
 import { useState } from "react";
 import { useRouter } from "next/navigation";
 
+const API = process.env.NEXT_PUBLIC_API_BASE;
+
 export default function Signup() {
   const [name, setName] = useState("");
   const [email,setEmail] = useState("");
@@ -10,14 +12,11 @@ export default function Signup() {
 
   async function signup() {
     try {
-      const res = await fetch(
-        "https://multibrokertradermultiuser-production-f735.up.railway.app/users/register",
-        {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ name, email, password })
-        }
-      );
+      const res = await fetch(`${API}/users/register`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ name, email, password })
+      });
 
       const data = await res.json();
 
@@ -52,27 +51,16 @@ export default function Signup() {
         textAlign:"center"
       }}>
 
-        <h2 style={{marginBottom:20, fontSize:24}}>Create User</h2>
+        <h2 style={{marginBottom:20}}>Create User</h2>
 
-        <input
-          style={inputStyle}
-          placeholder="Full Name"
-          onChange={e=>setName(e.target.value)}
-        />
+        <input style={inputStyle} placeholder="Full Name"
+          onChange={e=>setName(e.target.value)} />
 
-        <input
-          style={inputStyle}
-          placeholder="Email"
-          type="email"
-          onChange={e=>setEmail(e.target.value)}
-        />
+        <input style={inputStyle} type="email" placeholder="Email"
+          onChange={e=>setEmail(e.target.value)} />
 
-        <input
-          style={inputStyle}
-          placeholder="Password"
-          type="password"
-          onChange={e=>setPassword(e.target.value)}
-        />
+        <input style={inputStyle} type="password" placeholder="Password"
+          onChange={e=>setPassword(e.target.value)} />
 
         <button style={btnStyle} onClick={signup}>
           Create Account
@@ -96,8 +84,6 @@ const inputStyle = {
   marginBottom:15,
   borderRadius:8,
   border:"1px solid #ccc",
-  outline:"none",
-  fontSize:14
 }
 
 const btnStyle = {
@@ -107,7 +93,5 @@ const btnStyle = {
   color:"white",
   border:"none",
   borderRadius:8,
-  cursor:"pointer",
-  fontWeight:"bold",
-  fontSize:15
+  fontWeight:"bold"
 }
