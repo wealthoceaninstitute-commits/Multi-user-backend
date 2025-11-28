@@ -2,13 +2,13 @@
 
 import React, { useState } from "react";
 import { useRouter } from "next/navigation";
-import api from "../src/lib/api";
+import api from "../components/api";           // reuse your existing axios helper
 import { setCurrentUser } from "../src/lib/userSession";
 
 export default function LoginPage() {
   const router = useRouter();
 
-  const [activeTab, setActiveTab] = useState<"login" | "signup">("login");
+  const [activeTab, setActiveTab] = useState("login"); // "login" or "signup"
   const [loginForm, setLoginForm] = useState({
     username: "",
     password: "",
@@ -23,17 +23,17 @@ export default function LoginPage() {
 
   // -------------------- handlers --------------------
 
-  const handleLoginChange = (e: React.ChangeEvent<HTMLInputElement>) => {
+  const handleLoginChange = (e) => {
     const { name, value } = e.target;
     setLoginForm((prev) => ({ ...prev, [name]: value }));
   };
 
-  const handleSignupChange = (e: React.ChangeEvent<HTMLInputElement>) => {
+  const handleSignupChange = (e) => {
     const { name, value } = e.target;
     setSignupForm((prev) => ({ ...prev, [name]: value }));
   };
 
-  const handleLoginSubmit = async (e: React.FormEvent) => {
+  const handleLoginSubmit = async (e) => {
     e.preventDefault();
     setErrorMsg("");
     setLoading(true);
@@ -55,15 +55,18 @@ export default function LoginPage() {
         localStorage.setItem("token", data.token);
       }
 
-      // IMPORTANT: tell /trader who is logged in
+      // important: let frontend know who is logged in
       setCurrentUser(data.username);
 
       router.push("/trader");
-    } catch (err: any) {
+    } catch (err) {
       console.error("Login error:", err);
       const msg =
-        err?.response?.data?.detail ||
-        err?.message ||
+        (err &&
+          err.response &&
+          err.response.data &&
+          err.response.data.detail) ||
+        err.message ||
         "Login failed. Please check your username or password.";
       setErrorMsg(msg);
     } finally {
@@ -71,7 +74,7 @@ export default function LoginPage() {
     }
   };
 
-  const handleSignupSubmit = async (e: React.FormEvent) => {
+  const handleSignupSubmit = async (e) => {
     e.preventDefault();
     setErrorMsg("");
     setLoading(true);
@@ -94,15 +97,17 @@ export default function LoginPage() {
         localStorage.setItem("token", data.token);
       }
 
-      // IMPORTANT: mark user as logged in
       setCurrentUser(data.username);
 
       router.push("/trader");
-    } catch (err: any) {
+    } catch (err) {
       console.error("Signup error:", err);
       const msg =
-        err?.response?.data?.detail ||
-        err?.message ||
+        (err &&
+          err.response &&
+          err.response.data &&
+          err.response.data.detail) ||
+        err.message ||
         "User creation failed. Try a different username.";
       setErrorMsg(msg);
     } finally {
@@ -110,9 +115,9 @@ export default function LoginPage() {
     }
   };
 
-  // -------------------- UI --------------------
-
   const isLogin = activeTab === "login";
+
+  // -------------------- UI --------------------
 
   return (
     <div
