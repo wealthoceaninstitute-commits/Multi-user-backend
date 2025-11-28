@@ -1,75 +1,75 @@
 "use client";
-
 import { useState } from "react";
 import { useRouter } from "next/navigation";
 
 export default function Signup() {
-  const [name, setName] = useState("");
-  const [email,setEmail] = useState("");
-  const [password,setPassword] = useState("");
+  const [username, setUsername] = useState("");
+  const [email, setEmail]       = useState("");
+  const [password, setPassword] = useState("");
+
   const router = useRouter();
 
   const API_BASE = process.env.NEXT_PUBLIC_API_BASE;
 
   async function signup() {
-
-    if(!name || !email || !password){
-      alert("⚠️ All fields are required");
+    if (!username || !email || !password) {
+      alert("Please fill all fields");
       return;
     }
-
-    console.log("Sending:", { name, email, password });
 
     try {
       const res = await fetch(`${API_BASE}/users/register`, {
         method: "POST",
-        headers: {
-          "Content-Type":"application/json"
-        },
-        body: JSON.stringify({ name, email, password })
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          username,   // ✅ FIXED
+          email,
+          password,
+        }),
       });
 
       const data = await res.json();
-      console.log("Response:", data);
+
+      console.log("Signup response:", data);
 
       if (res.ok) {
         alert("✅ User Created Successfully");
         router.push("/login");
       } else {
-        alert(JSON.stringify(data));
+        alert(data.detail || data.message || "Signup failed");
       }
 
     } catch (err) {
       console.error(err);
-      alert("❌ Server not reachable");
+      alert("Server not reachable");
     }
   }
 
   return (
     <div style={{
-      display:"flex",
-      justifyContent:"center",
-      alignItems:"center",
-      height:"100vh",
-      background:"linear-gradient(135deg, #0f172a, #1e3a8a)"
+      display: "flex",
+      justifyContent: "center",
+      alignItems: "center",
+      height: "100vh",
+      background: "linear-gradient(135deg, #0f172a, #1e3a8a)"
     }}>
 
       <div style={{
-        width:350,
-        background:"white",
-        padding:30,
-        borderRadius:12,
-        boxShadow:"0 20px 40px rgba(0,0,0,0.3)",
-        textAlign:"center"
+        width: 360,
+        background: "white",
+        padding: 32,
+        borderRadius: 14,
+        boxShadow: "0 20px 40px rgba(0,0,0,0.35)",
+        textAlign: "center"
       }}>
 
-        <h2 style={{marginBottom:20}}>Create User</h2>
+        <h2 style={{ marginBottom: 22 }}>Create User</h2>
 
         <input
           style={inputStyle}
-          placeholder="Full Name"
-          value={name}
-          onChange={e=>setName(e.target.value)}
+          placeholder="Username"
+          value={username}
+          onChange={e => setUsername(e.target.value)}
         />
 
         <input
@@ -77,7 +77,7 @@ export default function Signup() {
           placeholder="Email"
           type="email"
           value={email}
-          onChange={e=>setEmail(e.target.value)}
+          onChange={e => setEmail(e.target.value)}
         />
 
         <input
@@ -85,19 +85,16 @@ export default function Signup() {
           placeholder="Password"
           type="password"
           value={password}
-          onChange={e=>setPassword(e.target.value)}
+          onChange={e => setPassword(e.target.value)}
         />
 
-        <button
-          style={btnStyle}
-          onClick={signup}
-        >
+        <button style={btnStyle} onClick={signup}>
           Create Account
         </button>
 
         <p
-          style={{marginTop:15,cursor:"pointer",color:"#1e40af"}}
-          onClick={()=>router.push("/login")}
+          style={{ marginTop: 16, cursor: "pointer", color: "#1e40af" }}
+          onClick={() => router.push("/login")}
         >
           Already have account? Login
         </p>
@@ -108,22 +105,23 @@ export default function Signup() {
 }
 
 const inputStyle = {
-  width:"100%",
-  padding:"12px",
-  marginBottom:15,
-  borderRadius:8,
-  border:"1px solid #ccc",
-  outline:"none",
-  fontSize:14
-}
+  width: "100%",
+  padding: "12px",
+  marginBottom: 16,
+  borderRadius: 8,
+  border: "1px solid #d1d5db",
+  outline: "none",
+  fontSize: 14
+};
 
 const btnStyle = {
-  width:"100%",
-  padding:"12px",
-  background:"#1e40af",
-  color:"white",
-  border:"none",
-  borderRadius:8,
-  cursor:"pointer",
-  fontWeight:"bold"
-}
+  width: "100%",
+  padding: "12px",
+  background: "#1e40af",
+  color: "white",
+  border: "none",
+  borderRadius: 8,
+  cursor: "pointer",
+  fontWeight: "600",
+  fontSize: 15
+};
