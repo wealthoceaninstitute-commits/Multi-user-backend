@@ -12,11 +12,8 @@ psycopg[binary,pool]>=3.2
 cryptography==41.0.7
 dhanhq>=2.0.2
 
-# Headless automation
+# Playwright Section
 playwright==1.49.0
 pytest-playwright==0.5.2
-pyee
+pyee==12.0.0   # Updated
 typing-extensions>=4.7.1
-
-
-
