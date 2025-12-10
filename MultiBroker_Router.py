@@ -392,32 +392,32 @@ def _update_minimal(broker: str, payload: Dict[str, Any]) -> str:
         existing = {}
 
     # Build merged doc (keep existing field when new candidate is empty)
-   if broker == "dhan":
-    doc = {
-        "userid": userid,
-        "name": _pick(name, existing.get("name")),
-        "mobile": _pick(payload.get("mobile"), payload.get("mobile_number"), existing.get("mobile")),
-        "pin": _pick(payload.get("pin"), existing.get("pin")),
-        "apikey": _pick(payload.get("apikey"), existing.get("apikey")),
-        "api_secret": _pick(payload.get("api_secret"), existing.get("api_secret")),
-        "totpkey": _pick(payload.get("totpkey"), existing.get("totpkey")),
-        "capital": payload.get("capital", existing.get("capital")),
-        "session_active": existing.get("session_active", False)
-    }
-
+       # Build merged doc (keep existing field when new candidate is empty)
+    if broker == "dhan":
+        doc = {
+            "userid": userid,
+            "name": _pick(name, existing.get("name")),
+            "mobile": _pick(payload.get("mobile"), payload.get("mobile_number"), existing.get("mobile")),
+            "pin": _pick(payload.get("pin"), existing.get("pin")),
+            "apikey": _pick(payload.get("apikey"), existing.get("apikey")),
+            "api_secret": _pick(payload.get("api_secret"), existing.get("api_secret")),
+            "totpkey": _pick(payload.get("totpkey"), existing.get("totpkey")),
+            "capital": payload.get("capital", existing.get("capital")),
+            "session_active": existing.get("session_active", False)
+        }
 
     else:  # motilal
         creds = payload.get("creds") or {}
         doc = {
-            "name":           _pick(name, existing.get("name")),
-            "userid":         userid,
-            "password":       _pick(payload.get("password"), creds.get("password"), existing.get("password")),
-            "pan":            _pick(payload.get("pan"), creds.get("pan"), creds.get("PAN"), existing.get("pan")),
-            "apikey":         _pick(payload.get("apikey"), creds.get("apikey"), creds.get("api_key"),
-                                    creds.get("apiKey"), existing.get("apikey")),
-            "totpkey":        _pick(payload.get("totpkey"), creds.get("totpkey"), creds.get("mpin"),
-                                    creds.get("otp"), existing.get("totpkey")),
-            "capital":        payload.get("capital", existing.get("capital")),
+            "userid": userid,
+            "name": _pick(name, existing.get("name")),
+            "password": _pick(payload.get("password"), creds.get("password"), existing.get("password")),
+            "pan": _pick(payload.get("pan"), creds.get("pan"), creds.get("PAN"), existing.get("pan")),
+            "apikey": _pick(payload.get("apikey"), creds.get("apikey"), creds.get("api_key"),
+                            creds.get("apiKey"), existing.get("apikey")),
+            "totpkey": _pick(payload.get("totpkey"), creds.get("totpkey"), creds.get("mpin"),
+                            creds.get("otp"), existing.get("totpkey")),
+            "capital": payload.get("capital", existing.get("capital")),
             "session_active": bool(payload.get("session_active", existing.get("session_active", False))),
         }
 
@@ -1980,6 +1980,7 @@ def route_modify_order(payload: Dict[str, Any] = Body(...)):
 if __name__ == "__main__":
     import uvicorn
     uvicorn.run("MultiBroker_Router:app", host="127.0.0.1", port=5001, reload=False)
+
 
 
 
