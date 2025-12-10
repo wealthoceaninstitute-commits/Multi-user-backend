@@ -1,20 +1,11 @@
-# Force Python + Node environment
 [phases.setup]
-nixPkgs = ["python312", "nodejs_18", "openssl", "gcc"]
+nixPackages = ["python312", "pip", "nodejs_18"]
 
-# Install pip manually under python
 [phases.install]
 cmds = [
-  "python3 -m ensurepip --upgrade",
-  "pip3 install --upgrade pip",
-  "pip3 install -r requirements.txt"
-]
-
-# Build Next.js if exists
-[phases.build]
-cmds = [
-  "if [ -f package.json ]; then npm install && npm run build; fi"
+  "pip install -r requirements.txt",
+  "npm install"
 ]
 
 [start]
-cmd = "python3 -m uvicorn MultiBroker_Router:app --host 0.0.0.0 --port ${PORT}"
+cmd = "python3 -m uvicorn MultiBroker_Router:app --host 0.0.0.0 --port $PORT"
