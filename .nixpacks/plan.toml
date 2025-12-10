@@ -1,18 +1,20 @@
 [phases.setup]
-nixPkgs = ["python312", "nodejs_18", "openssl", "gcc"]
+# install both python and node
+nixpkgs = ["python312", "nodejs_18", "openssl", "gcc"]
 
 [phases.install]
 commands = [
-  "python3 -m ensurepip",
-  "python3 -m pip install --upgrade pip",
-  "python3 -m pip install -r requirements.txt"
+    "python3 -m ensurepip",
+    "python3 -m pip install --upgrade pip",
+    "python3 -m pip install -r requirements.txt"
 ]
 
 [phases.build]
 commands = [
-  "npm install --force || true",
-  "npm run build || true"
+    "npm install --force || true",
+    "npm run build || true"
 ]
 
 [start]
-command = "python3 -m uvicorn MultiBroker_Router:app --host 0.0.0.0 --port $PORT"
+# run FastAPI backend using uvicorn
+cmd = "python3 -m uvicorn MultiBroker_Router:app --host 0.0.0.0 --port $PORT"
