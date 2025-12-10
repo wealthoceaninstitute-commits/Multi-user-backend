@@ -1,0 +1,16 @@
+[variables]
+PORT = "8000"
+
+# Install Python + Node (because project has both)
+[phases.setup]
+nixPkgs = ["python312", "pip", "nodejs_18", "openssl", "gcc"]
+
+# Install backend dependencies
+[phases.build]
+cmds = [
+  "pip install --upgrade pip",
+  "pip install -r requirements.txt"
+]
+
+[start]
+cmd = "uvicorn MultiBroker_Router:app --host 0.0.0.0 --port ${PORT}"
