@@ -20,11 +20,10 @@ _symbol_db_lock = threading.Lock()
 
 
 # --- GitHub global config (single source of truth) ---
-GITHUB_TOKEN  = os.getenv("GITHUB_TOKEN")
+GITHUB_TOKEN  = os.getenv("GITHUB_TOKEN")                       # <-- set in Railway
 GITHUB_OWNER  = os.getenv("GITHUB_REPO_OWNER") or "wealthoceaninstitute-commits"
 GITHUB_REPO   = os.getenv("GITHUB_REPO_NAME")  or "Dhan_test"
 GITHUB_BRANCH = os.getenv("GITHUB_BRANCH", "main")
-
 
 def GH_HEADERS():
     # Keep Accept header even if token missing (no-op mode)
@@ -144,17 +143,72 @@ def _github_sync_down_all():
 # === GitHub persistence helpers ===
 def _github_file_write(rel_path: str, content: str) -> None:
     """
-    NO GitHub sync in this test mode.
-    This function now only prints the intent.
+    Create or update a file in GitHub at <rel_path> on GITHUB_BRANCH.
+    Uses global config (GITHUB_*). No-op if config incomplete.
     """
-    print(f"[TEST MODE] Skipped GitHub upload: {rel_path}")
+    if not (GITHUB_OWNER and GITHUB_REPO and rel_path):
+        return  # missing config or bad path
+
+    url = GH_CONTENTS_URL(rel_path)
+
+    # Try to get current sha (use ?ref=branch for correct head)
+    sha = None
+    try:
+        resp = requests.get(f"{url}?ref={GITHUB_BRANCH}", headers=GH_HEADERS(), timeout=15)
+        if resp.status_code == 200:
+            sha = (resp.json() or {}).get("sha")
+    except Exception:
+        pass
+
+    try:
+        b64 = base64.b64encode((content or "").encode("utf-8")).decode("utf-8")
+    except Exception:
+        return
+
+    payload = {
+        "message": f"Update {rel_path}",
+        "content": b64,
+        "branch": GITHUB_BRANCH,
+    }
+    if sha:
+        payload["sha"] = sha
+
+    try:
+        requests.put(url, headers=GH_HEADERS(), json=payload, timeout=20)
+    except Exception:
+        pass
 
 
 def _github_file_delete(rel_path: str) -> None:
     """
-    NO GitHub delete in test mode.
+    Delete a file in GitHub at <rel_path> on GITHUB_BRANCH.
+    Uses global config (GITHUB_*). No-op if config incomplete or file missing.
     """
-    print(f"[TEST MODE] Skipped GitHub delete: {rel_path}")
+    if not (GITHUB_OWNER and GITHUB_REPO and rel_path):
+        return
+
+    url = GH_CONTENTS_URL(rel_path)
+
+    # Need current sha for delete
+    sha = None
+    try:
+        r = requests.get(f"{url}?ref={GITHUB_BRANCH}", headers=GH_HEADERS(), timeout=15)
+        if r.status_code == 200:
+            sha = (r.json() or {}).get("sha")
+    except Exception:
+        pass
+    if not sha:
+        return
+
+    payload = {
+        "message": f"Delete {rel_path}",
+        "sha": sha,
+        "branch": GITHUB_BRANCH,
+    }
+    try:
+        requests.delete(url, headers=GH_HEADERS(), json=payload, timeout=20)
+    except Exception:
+        pass
 
 
 def refresh_symbol_db_from_github() -> str:
@@ -672,8 +726,7 @@ def _build_multipliers(children: list[str], rawm) -> dict[str, float]:
 @app.on_event("startup")
 def _symbols_startup():
     _lazy_init_symbol_db()
-    print("[TEST MODE] GitHub sync disabled.")
-
+    _github_sync_down_all()  # <- add this line
 
 @app.get("/health")
 def health():
@@ -1982,36 +2035,3 @@ def route_modify_order(payload: Dict[str, Any] = Body(...)):
 if __name__ == "__main__":
     import uvicorn
     uvicorn.run("MultiBroker_Router:app", host="127.0.0.1", port=5001, reload=False)
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
