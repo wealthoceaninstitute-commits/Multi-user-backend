@@ -29,6 +29,156 @@ def _read_clients() -> List[Dict[str, Any]]:
         pass
     return items
 
+#############################################
+# 🔥 DHAN AUTO LOGIN INTEGRATION
+#############################################
+import time
+import pyotp
+from urllib.parse import urlparse, parse_qs
+from playwright.sync_api import sync_playwright
+
+AUTH_BASE = "https://auth.dhan.co/app"
+LOGIN_URL_BASE = "https://partner-login.dhan.co/?consentAppId="
+
+def _save_access_token(client: Dict[str, Any], new_token: str):
+    """
+    Persists updated access_token into the user's JSON file.
+    """
+    uid = str(client.get("userid") or client.get("client_id"))
+    if not uid:
+        return False
+
+    path = os.path.join(CLIENTS_DIR, f"{uid}.json")
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            data = json.load(f)
+    except:
+        data = client
+
+    data["apikey"] = new_token
+    data["access_token"] = new_token
+
+    try:
+        with open(path, "w", encoding="utf-8") as f:
+            json.dump(data, f, indent=2)
+        print(f"[DHAN] Saved new access token for {uid}")
+        return True
+    except Exception as e:
+        print(f"[DHAN] Failed saving token for {uid}: {e}")
+        return False
+
+
+def _generate_consent(client: Dict[str, Any]):
+    client_id = client.get("userid")
+    api_key = client.get("api_key") or client.get("apikey")
+    api_secret = client.get("api_secret")
+
+    if not (client_id and api_key and api_secret):
+        raise Exception("Missing Dhan credentials")
+
+    url = f"{AUTH_BASE}/generate-consent?client_id={client_id}"
+    headers = {"app_id": api_key, "app_secret": api_secret}
+
+    r = requests.post(url, headers=headers, timeout=15)
+    if r.status_code != 200:
+        raise Exception(f"Consent generation failed: {r.text}")
+
+    data = r.json()
+    return data.get("consentAppId")
+
+
+def _browser_login(client: Dict[str, Any], consent_id: str):
+    login_url = f"{LOGIN_URL_BASE}{consent_id}"
+
+    totp_secret = client.get("totpkey")
+    mobile = client.get("mobile")
+    pin = client.get("pin")
+
+    if not all([totp_secret, mobile, pin]):
+        raise Exception("Missing TOTP / mobile / pin")
+
+    with sync_playwright() as p:
+        browser = p.chromium.launch(headless=True)
+        page = browser.new_page()
+        page.goto(login_url, wait_until="domcontentloaded")
+
+        # Enter mobile
+        page.fill("input[type='tel']", mobile)
+        page.click("button:has-text('Proceed')")
+        time.sleep(1)
+
+        # TOTP
+        otp = pyotp.TOTP(totp_secret).now()
+        time.sleep(2)
+        otp_inputs = page.query_selector_all("input")
+        for i, box in enumerate(otp_inputs[:len(otp)]):
+            box.fill(otp[i])
+
+        # Continue from OTP
+        try:
+            page.click("button:has-text('Proceed')")
+        except:
+            pass
+
+        # PIN
+        time.sleep(2)
+        pin_inputs = page.query_selector_all("input[type='password'],input[type='tel']")
+        for i, box in enumerate(pin_inputs[:len(pin)]):
+            box.fill(pin[i])
+            time.sleep(0.2)
+
+        try:
+            page.click("button:has-text('Continue')")
+        except:
+            pass
+
+        # Wait for redirect
+        page.wait_for_url("**tokenId=**", timeout=20000)
+        final_url = page.url
+        query = parse_qs(urlparse(final_url).query)
+        token_id = query.get("tokenId", [""])[0]
+        browser.close()
+
+        if not token_id:
+            raise Exception("Token ID missing")
+        return token_id
+
+
+def _exchange_access_token(client: Dict[str, Any], token_id: str):
+    api_key = client.get("api_key") or client.get("apikey")
+    api_secret = client.get("api_secret")
+
+    url = f"{AUTH_BASE}/consumeApp-consent?tokenId={token_id}"
+    headers = {"app_id": api_key, "app_secret": api_secret}
+
+    r = requests.get(url, headers=headers)
+    if r.status_code != 200:
+        raise Exception("Access token generation failed")
+
+    return r.json().get("accessToken")
+
+
+def auto_login(client: Dict[str, Any]):
+    """
+    Main callable used by the router.
+    1) Generate consent
+    2) Headless login
+    3) Generate access token
+    4) Save token into user json
+    """
+    try:
+        consent = _generate_consent(client)
+        token_id = _browser_login(client, consent)
+        access_token = _exchange_access_token(client, token_id)
+
+        if access_token:
+            _save_access_token(client, access_token)
+            return {"ok": True, "access_token": access_token}
+        return {"ok": False, "message": "Failed to obtain token"}
+    except Exception as e:
+        return {"ok": False, "message": str(e)}
+
+
 def _norm_order_type(s: str) -> str:
     """
     Normalize UI/Router variants to Dhan API enums.
@@ -98,73 +248,24 @@ def _parse_token_validity(ts: str):
             continue
     return None
 
-def login(client: Dict[str, Any]) -> Dict[str, Any]:
-    """
-    Returns a dict so the caller can persist/show warnings, but remains truthy.
-    Shape:
-      {
-        "ok": bool,
-        "token_validity_raw": "...",
-        "token_validity_iso": "...",
-        "token_days_left": int|None,
-        "token_warning": bool,
-        "message": "..."   # only when warning
-      }
-    """
-    token = (client.get("apikey") or client.get("access_token") or "").strip()
-    if not token:
-        return {"ok": False, "message": "Missing access token"}
+def login(client: Dict[str, Any]):
+    token = client.get("apikey") or client.get("access_token")
+    check = {}
 
-    name = client.get("name") or client.get("display_name") or ""
-    uid  = str(client.get("userid") or client.get("client_id") or "").strip()
+    if token:
+        check = _check_token_validity(token)
+        if check.get("ok"):
+            return check  # token valid, no automation needed
 
-    try:
-        r = requests.get(
-            "https://api.dhan.co/v2/profile",
-            headers={"access-token": token},
-            timeout=15
-        )
-        ok = (r.status_code == 200)
-        body = {}
-        try:
-            body = r.json() if r.content else {}
-        except Exception:
-            body = {}
+    print(f"[DHAN] Token missing or expired → triggering auto-login for {client.get('userid')}")
+    auto = auto_login(client)
 
-        # Parse tokenValidity (if present)
-        tv_raw = str(body.get("tokenValidity") or body.get("tokenvalidity") or "").strip()
-        tv_dt  = _parse_token_validity(tv_raw)
-        now    = datetime.now(_IST) if _IST else datetime.now()
+    if auto.get("ok"):
+        # verify new token
+        client["access_token"] = auto["access_token"]
+        return _check_token_validity(auto["access_token"])
 
-        days_left = None
-        warn = False
-        msg = ""
-
-        if tv_dt:
-            seconds_left = (tv_dt - now).total_seconds()
-            days_left = max(0, int(seconds_left // 86400))
-            warn = seconds_left <= 2 * 86400  # <= 2 days
-            if warn:
-                msg = (f"⚠️ Dhan token for {name or uid} expires in "
-                       f"{days_left} day(s) on {tv_raw}. Please regenerate a new token.")
-
-                # Also log to console for immediate visibility
-                try:
-                    print(f"[DHAN] {msg}")
-                except Exception:
-                    pass
-
-        return {
-            "ok": ok,
-            "token_validity_raw": tv_raw,
-            "token_validity_iso": (tv_dt.isoformat() if tv_dt else ""),
-            "token_days_left": days_left,
-            "token_warning": warn,
-            "message": msg
-        }
-
-    except Exception as e:
-        return {"ok": False, "message": f"Dhan /v2/profile error: {e}"}
+    return {"ok": False, "message": auto.get("message")}
 
 
 
@@ -866,6 +967,7 @@ def modify_orders(orders: List[Dict[str, Any]]) -> Dict[str, Any]:
             messages.append(f"❌ {row.get('name','<unknown>')} ({row.get('order_id','?')}): {e}")
 
     return {"message": messages}
+
 
 
 
