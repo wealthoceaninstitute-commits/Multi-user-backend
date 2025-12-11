@@ -84,6 +84,28 @@ def _read_json(path: str) -> Dict[str, Any]:
     except Exception:
         return {}
 
+from fastapi import APIRouter, Request
+
+router = APIRouter()
+
+@router.get("/dhan/callback")
+async def dhan_callback(code: str = None):
+    print("Dhan Redirect Callback Hit")
+    print("Received Code:", code)
+    return {"status": "OK", "message": "Callback received", "code": code}
+
+@router.post("/dhan/postback")
+async def dhan_postback(request: Request):
+    data = await request.json()
+    print("Dhan Postback Hit")
+    print("POST Data:", data)
+
+    # Save token JSON locally if needed
+    with open("dhan_token.json", "w") as f:
+        json.dump(data, f, indent=4)
+
+    return {"status": "received"}
+
 
 
 
@@ -2037,4 +2059,5 @@ def route_modify_order(payload: Dict[str, Any] = Body(...)):
 if __name__ == "__main__":
     import uvicorn
     uvicorn.run("MultiBroker_Router:app", host="127.0.0.1", port=5001, reload=False)
+
 
