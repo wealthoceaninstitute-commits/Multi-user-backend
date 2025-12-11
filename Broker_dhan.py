@@ -157,6 +157,23 @@ def _exchange_access_token(client: Dict[str, Any], token_id: str):
 
     return r.json().get("accessToken")
 
+def _check_token_validity(token: str) -> Dict[str, Any]:
+    try:
+        r = requests.get(
+            "https://api.dhan.co/v2/profile",
+            headers={"access-token": token},
+            timeout=10
+        )
+        if r.status_code != 200:
+            return {"ok": False}
+
+        data = r.json()
+        return {"ok": True, "data": data}
+
+    except Exception:
+        return {"ok": False}
+
+
 
 def auto_login(client: Dict[str, Any]):
     """
@@ -967,6 +984,7 @@ def modify_orders(orders: List[Dict[str, Any]]) -> Dict[str, Any]:
             messages.append(f"❌ {row.get('name','<unknown>')} ({row.get('order_id','?')}): {e}")
 
     return {"message": messages}
+
 
 
 
