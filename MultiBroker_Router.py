@@ -396,7 +396,8 @@ def _save_minimal(broker: str, payload: Dict[str, Any]) -> str:
             "api_secret": _pick(payload.get("api_secret")),
             "totpkey": _pick(payload.get("totpkey")),
             "capital": payload.get("capital", ""),
-            "session_active": False
+            "session_active": False,
+             "access_token": "",
         }
 
     else:  # motilal — unchanged
@@ -459,7 +460,8 @@ def _update_minimal(broker: str, payload: Dict[str, Any]) -> str:
             "api_secret": _pick(payload.get("api_secret"), existing.get("api_secret")),
             "totpkey": _pick(payload.get("totpkey"), existing.get("totpkey")),
             "capital": payload.get("capital", existing.get("capital")),
-            "session_active": existing.get("session_active", False)
+            "session_active": existing.get("session_active", False),
+             "access_token": "",
         }
 
     else:  # motilal
@@ -2035,3 +2037,4 @@ def route_modify_order(payload: Dict[str, Any] = Body(...)):
 if __name__ == "__main__":
     import uvicorn
     uvicorn.run("MultiBroker_Router:app", host="127.0.0.1", port=5001, reload=False)
+
