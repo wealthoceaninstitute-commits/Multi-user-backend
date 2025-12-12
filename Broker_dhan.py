@@ -288,18 +288,18 @@ def _browser_login(client: Dict[str, Any], consent_id: str):
 
 def _exchange_access_token(client: dict, token_id: str) -> dict:
     """
-    Exchange tokenId for Dhan accessToken.
-    STEP-3 after browser login.
+    STEP-3: Exchange tokenId for Dhan access token
+    Saving is handled by router (NOT here)
     """
 
-    print(f"[DHAN][EXCHANGE] Starting token exchange for userid={client.get('userid')}", flush=True)
-    print(f"[DHAN][EXCHANGE] Using tokenId={token_id}", flush=True)
+    print(f"[DHAN][EXCHANGE] Starting token exchange userid={client.get('userid')}", flush=True)
+    print(f"[DHAN][EXCHANGE] tokenId={token_id}", flush=True)
 
     api_key = client.get("apikey")
-    api_secret = client.get("api_secret")  # kept for records only
+    api_secret = client.get("api_secret")
 
-    if not api_key:
-        raise Exception("Missing api_key for token exchange")
+    if not api_key or not api_secret:
+        raise Exception("Missing api_key / api_secret")
 
     url = f"https://auth.dhan.co/app/consumeApp-consent?tokenId={token_id}"
 
@@ -307,13 +307,13 @@ def _exchange_access_token(client: dict, token_id: str) -> dict:
         "Accept": "application/json",
         "Content-Type": "application/json",
 
-        # ✅ CRITICAL FIX
+        # ✅ REQUIRED BY DHAN
         "app_id": api_key,
         "app_secret": api_secret,
     }
 
     print(f"[DHAN][EXCHANGE] POST {url}", flush=True)
-    print(f"[DHAN][EXCHANGE] Headers client-id={api_key[:4]}****", flush=True)
+    print(f"[DHAN][EXCHANGE] app_id={api_key[:4]}****", flush=True)
 
     resp = requests.post(url, headers=headers, timeout=15)
 
@@ -322,26 +322,28 @@ def _exchange_access_token(client: dict, token_id: str) -> dict:
     try:
         data = resp.json()
     except Exception:
-        raise Exception(f"Non-JSON exchange response: {resp.text}")
+        print(f"[DHAN][EXCHANGE] Non-JSON response: {resp.text}", flush=True)
+        raise Exception("Invalid exchange response")
 
     print(f"[DHAN][EXCHANGE] Response JSON:\n{json.dumps(data, indent=2)}", flush=True)
 
     if resp.status_code != 200:
-        raise Exception(data.get("message") or "Token exchange failed")
+        raise Exception("Token exchange failed")
 
     access_token = data.get("accessToken")
-    expiry = data.get("expiryTime")
+    expiry_time = data.get("expiryTime")
 
     if not access_token:
-        raise Exception("accessToken missing in exchange response")
+        raise Exception("accessToken missing")
+
+    print("[DHAN][EXCHANGE] ✅ Access token obtained", flush=True)
 
     return {
         "ok": True,
         "access_token": access_token,
-        "expiryTime": expiry,
-        "message": "Dhan login successful",
+        "expiry_time": expiry_time,
+        "raw": data,
     }
-
 
 
 def _check_token_validity(token: str) -> Dict[str, Any]:
@@ -1177,6 +1179,7 @@ def modify_orders(orders: List[Dict[str, Any]]) -> Dict[str, Any]:
             messages.append(f"❌ {row.get('name','<unknown>')} ({row.get('order_id','?')}): {e}")
 
     return {"message": messages}
+
 
 
 
