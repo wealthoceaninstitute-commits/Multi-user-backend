@@ -102,6 +102,8 @@ async def dhan_callback(tokenId: str = None):
         "tokenId": tokenId
     }
 
+    
+
 
 @router.post("/dhan/postback")
 async def dhan_postback(request: Request):
@@ -361,9 +363,6 @@ def router_search_symbols(q: str = Query(""), exchange: str = Query("")):
     return {"results": results}
 
 
-@app.on_event("startup")
-def _symbols_startup():
-    _lazy_init_symbol_db()
 
 
 def _safe(s: str) -> str:
@@ -2068,6 +2067,7 @@ def route_modify_order(payload: Dict[str, Any] = Body(...)):
 if __name__ == "__main__":
     import uvicorn
     uvicorn.run("MultiBroker_Router:app", host="127.0.0.1", port=5001, reload=False)
+
 
 
 
