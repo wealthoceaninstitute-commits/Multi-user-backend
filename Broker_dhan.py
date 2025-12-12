@@ -287,13 +287,7 @@ def _browser_login(client: Dict[str, Any], consent_id: str):
 
 
 def _exchange_access_token(client: dict, token_id: str) -> dict:
-    """
-    Exchange tokenId for Dhan accessToken.
-    This is STEP-3 after browser login.
-    """
-
     print(f"[DHAN][EXCHANGE] Starting token exchange for userid={client.get('userid')}", flush=True)
-    print(f"[DHAN][EXCHANGE] Using tokenId={token_id}", flush=True)
 
     api_key = client.get("apikey")
     api_secret = client.get("api_secret")
@@ -304,54 +298,36 @@ def _exchange_access_token(client: dict, token_id: str) -> dict:
     url = f"https://auth.dhan.co/app/consumeApp-consent?tokenId={token_id}"
 
     headers = {
+        "app_id": api_key,
+        "app_secret": api_secret,
         "Accept": "application/json",
         "Content-Type": "application/json",
-
-        # 🔑 THESE TWO HEADERS ARE MANDATORY
-        "client-id": api_key,
-        "access-token": api_secret,
     }
 
     print(f"[DHAN][EXCHANGE] POST {url}", flush=True)
-    print(f"[DHAN][EXCHANGE] Headers client-id={api_key[:4]}****", flush=True)
 
-    try:
-        resp = requests.post(url, headers=headers, timeout=15)
-    except Exception as e:
-        print(f"[DHAN][EXCHANGE] ❌ HTTP request failed: {e}", flush=True)
-        raise Exception("Token exchange HTTP error")
+    resp = requests.post(
+        url,
+        headers=headers,
+        json={},          # 🔥 REQUIRED
+        timeout=15
+    )
 
     print(f"[DHAN][EXCHANGE] HTTP status={resp.status_code}", flush=True)
-
-    try:
-        data = resp.json()
-    except Exception:
-        print(f"[DHAN][EXCHANGE] ❌ Non-JSON response: {resp.text}", flush=True)
-        raise Exception("Invalid exchange response")
-
+    data = resp.json()
     print(f"[DHAN][EXCHANGE] Response JSON:\n{json.dumps(data, indent=2)}", flush=True)
 
     if resp.status_code != 200:
-        raise Exception(data.get("message") or "Token exchange failed")
+        raise Exception("Token exchange failed")
 
-    access_token = data.get("accessToken") or data.get("access_token")
-    expiry = data.get("validity") or data.get("expiry")
-
+    access_token = data.get("accessToken")
     if not access_token:
         raise Exception("accessToken missing in exchange response")
-
-    # ✅ SAVE INTO CLIENT JSON
-    client["access_token"] = access_token
-    client["token_validity_raw"] = expiry
-    client["session_active"] = True
-
-    print("[DHAN][EXCHANGE] ✅ Access token obtained successfully", flush=True)
 
     return {
         "ok": True,
         "access_token": access_token,
-        "token_validity_raw": expiry,
-        "message": "Dhan login successful",
+        "token_validity_raw": data.get("validity"),
     }
 
 
@@ -1227,6 +1203,7 @@ def modify_orders(orders: List[Dict[str, Any]]) -> Dict[str, Any]:
             messages.append(f"❌ {row.get('name','<unknown>')} ({row.get('order_id','?')}): {e}")
 
     return {"message": messages}
+
 
 
 
