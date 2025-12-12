@@ -10,6 +10,9 @@ STAT_KEYS = ["pending", "traded", "rejected", "cancelled", "others"]
 BASE_DIR    = os.path.abspath(os.environ.get("DATA_DIR", "./data"))
 CLIENTS_DIR = os.path.join(BASE_DIR, "clients", "dhan")
 
+def _dlog(step: str, msg: str = ""):
+    print(f"[DHAN][{step}] {msg}", flush=True)
+
 
 # ---------------------------
 # helpers
@@ -41,48 +44,113 @@ AUTH_BASE = "https://auth.dhan.co/app"
 LOGIN_URL_BASE = "https://partner-login.dhan.co/?consentAppId="
 
 def _save_access_token(client: Dict[str, Any], new_token: str):
+    """
+    Saves / updates access_token in client JSON.
+    Logic unchanged – only debug logs added.
+    """
+    def dlog(msg):
+        print(f"[DHAN][SAVE] {msg}", flush=True)
+
     uid = str(client.get("userid") or client.get("client_id"))
     if not uid:
+        dlog("❌ Missing userid / client_id, cannot save token")
         return False
 
     path = os.path.join(CLIENTS_DIR, f"{uid}.json")
+    dlog(f"Saving token for userid={uid}")
+    dlog(f"Target file={path}")
 
+    # Load existing JSON if present
     try:
         with open(path, "r", encoding="utf-8") as f:
             data = json.load(f)
-    except:
+        dlog("Loaded existing client JSON")
+    except Exception:
+        dlog("Client JSON not found, creating new one")
         data = client.copy()
 
-    data["access_token"] = new_token  # Only access_token is updated
+    # Update token only
+    data["access_token"] = new_token
 
     try:
         with open(path, "w", encoding="utf-8") as f:
             json.dump(data, f, indent=2)
-        print(f"[DHAN] Updated access_token for {uid}")
+
+        safe_tok = f"{new_token[:6]}...{new_token[-4:]}"
+        dlog(f"✅ access_token saved: {safe_tok}")
         return True
+
     except Exception as e:
-        print(f"[DHAN] Failed token save: {e}")
+        dlog(f"❌ Failed to save token: {e}")
         return False
 
 
 
 def _generate_consent(client: Dict[str, Any]) -> str:
+    """
+    Generates consentAppId from Dhan.
+    Logic unchanged – only debug logs added.
+    """
+    def dlog(msg):
+        print(f"[DHAN][CONSENT] {msg}", flush=True)
+
     client_id  = client.get("userid")
     api_key    = client.get("apikey")
     api_secret = client.get("api_secret")
 
-    if not (client_id and api_key and api_secret):
+    dlog(f"Starting consent generation for userid={client_id}")
+
+    if not client_id:
+        dlog("❌ Missing client_id / userid")
+        raise Exception("Missing client_id for consent generation")
+
+    if not api_key or not api_secret:
+        dlog("❌ Missing api_key or api_secret")
         raise Exception("Missing Dhan API credentials")
 
+    safe_key = f"{api_key[:6]}...{api_key[-4:]}"
+    dlog(f"Using api_key={safe_key}")
+
     url = f"{AUTH_BASE}/generate-consent?client_id={client_id}"
-    headers = {"app_id": api_key, "app_secret": api_secret}
+    headers = {
+        "app_id": api_key,
+        "app_secret": api_secret
+    }
 
-    r = requests.post(url, headers=headers, timeout=15)
+    dlog(f"POST {url}")
+
+    try:
+        r = requests.post(url, headers=headers, timeout=15)
+    except Exception as e:
+        dlog(f"❌ HTTP request failed: {e}")
+        raise
+
+    dlog(f"HTTP status={r.status_code}")
+
     if r.status_code != 200:
-        raise Exception(f"Consent failed: {r.text}")
+        try:
+            body = r.text
+        except Exception:
+            body = "<no body>"
+        dlog(f"❌ Consent failed response: {body}")
+        raise Exception("Consent generation failed")
 
-    data = r.json()
-    return data.get("consentAppId")
+    try:
+        data = r.json()
+    except Exception:
+        dlog("❌ Failed to parse JSON response")
+        raise Exception("Invalid JSON in consent response")
+
+    consent_id = data.get("consentAppId")
+
+    if not consent_id:
+        dlog(f"❌ consentAppId missing in response: {data}")
+        raise Exception("consentAppId not found in response")
+
+    dlog(f"✅ consentAppId generated: {consent_id}")
+
+    return consent_id
+
 
 
 
@@ -94,6 +162,9 @@ def _browser_login(client: Dict[str, Any], consent_id: str):
     3. Enter PIN
     4. Wait for redirect & extract tokenId
     """
+    def dlog(msg):
+        print(f"[DHAN][BROWSER] {msg}", flush=True)
+
     login_url = f"{LOGIN_URL_BASE}{consent_id}"
 
     mobile = client.get("mobile")
@@ -101,31 +172,45 @@ def _browser_login(client: Dict[str, Any], consent_id: str):
     pin = client.get("pin")
 
     if not all([mobile, totp_secret, pin]):
+        dlog("❌ Missing mobile / totp / pin")
         raise Exception("Missing mobile/totp/pin for Dhan login")
+
+    dlog(f"Launching browser for userid={client.get('userid')}")
 
     with sync_playwright() as p:
         browser = p.chromium.launch(
             headless=True,
             args=["--no-sandbox", "--disable-gpu", "--disable-dev-shm-usage"]
         )
+
         page = browser.new_page()
+        dlog(f"Opening URL: {login_url}")
         page.goto(login_url, wait_until="domcontentloaded")
 
         # -------------------------
         # STEP 1: MOBILE INPUT
         # -------------------------
+        dlog("Waiting for mobile input field")
         page.wait_for_selector("input[type='tel'], input[name='mobile']", timeout=20000)
+
+        dlog(f"Entering mobile ****{mobile[-4:]}")
         page.fill("input[type='tel'], input[name='mobile']", mobile)
 
         proceed = page.query_selector("button:has-text('Proceed')")
         if proceed:
+            dlog("Clicking Proceed (mobile)")
             proceed.click()
+        else:
+            dlog("Proceed button not found after mobile")
+
         time.sleep(1)
 
         # -------------------------
         # STEP 2: TOTP INPUT
         # -------------------------
         totp = pyotp.TOTP(totp_secret).now()
+        dlog(f"Generated TOTP: {totp}")
+
         otp_fields = page.query_selector_all(
             "input[aria-label='otp-input'], "
             "input[autocomplete='one-time-code'], "
@@ -133,46 +218,58 @@ def _browser_login(client: Dict[str, Any], consent_id: str):
         )
 
         if len(otp_fields) < 4:
+            dlog("OTP fields < 4, falling back to all inputs")
             otp_fields = page.query_selector_all("input")
 
+        dlog(f"Filling {len(totp)} OTP digits")
         for i, f in enumerate(otp_fields[:len(totp)]):
             f.fill(totp[i])
             time.sleep(0.15)
 
-        # Click Proceed if still visible
         otp_proceed = page.query_selector("button:has-text('Proceed'):not([disabled])")
         if otp_proceed:
+            dlog("Clicking Proceed (OTP)")
             otp_proceed.click()
+        else:
+            dlog("Proceed button not found after OTP")
 
         time.sleep(1)
 
         # -------------------------
         # STEP 3: PIN INPUT
         # -------------------------
+        dlog("Waiting for PIN input fields")
         pin_boxes = page.query_selector_all(
             "input[type='password'], input.input-box, input[type='tel']"
         )
 
         if len(pin_boxes) < len(pin):
+            dlog("PIN boxes insufficient, retrying after delay")
             time.sleep(1.5)
             pin_boxes = page.query_selector_all(
                 "input[type='password'], input.input-box, input[type='tel']"
             )
 
+        dlog(f"Filling PIN digits ({len(pin)})")
         for i, box in enumerate(pin_boxes[:len(pin)]):
             box.fill(pin[i])
             time.sleep(0.2)
 
-        # Continue button
         cont = page.query_selector("button:has-text('Continue'):not([disabled])")
         if cont:
+            dlog("Clicking Continue (PIN)")
             cont.click()
+        else:
+            dlog("Continue button not found after PIN")
 
         # -------------------------
         # STEP 4: Redirect
         # -------------------------
+        dlog("Waiting for redirect with tokenId")
         page.wait_for_url("**tokenId=**", timeout=20000)
+
         final_url = page.url
+        dlog(f"Redirect URL: {final_url}")
 
         from urllib.parse import urlparse, parse_qs
         query = parse_qs(urlparse(final_url).query)
@@ -181,24 +278,77 @@ def _browser_login(client: Dict[str, Any], consent_id: str):
         browser.close()
 
         if not token_id:
+            dlog("❌ tokenId NOT found in redirect URL")
             raise Exception("tokenId not found during login")
 
+        dlog(f"✅ tokenId extracted: {token_id}")
         return token_id
 
 
 
 def _exchange_access_token(client: Dict[str, Any], token_id: str):
+    """
+    Exchanges tokenId for accessToken from Dhan.
+    Logic unchanged – only debug logs added.
+    """
+    def dlog(msg):
+        print(f"[DHAN][EXCHANGE] {msg}", flush=True)
+
     api_key    = client.get("apikey")
     api_secret = client.get("api_secret")
 
+    if not api_key or not api_secret:
+        dlog("❌ Missing api_key / api_secret")
+        raise Exception("Missing API credentials for token exchange")
+
+    if not token_id:
+        dlog("❌ tokenId is empty")
+        raise Exception("Empty tokenId received")
+
+    dlog(f"Starting token exchange for userid={client.get('userid')}")
+    dlog(f"Using tokenId={token_id}")
+
     url = f"{AUTH_BASE}/consumeApp-consent?tokenId={token_id}"
-    headers = {"app_id": api_key, "app_secret": api_secret}
+    headers = {
+        "app_id": api_key,
+        "app_secret": api_secret
+    }
 
-    r = requests.get(url, headers=headers, timeout=15)
+    dlog(f"Calling exchange endpoint: {url}")
+
+    try:
+        r = requests.get(url, headers=headers, timeout=15)
+    except Exception as e:
+        dlog(f"❌ HTTP request failed: {e}")
+        raise
+
+    dlog(f"HTTP status={r.status_code}")
+
     if r.status_code != 200:
-        raise Exception(f"Token exchange failed: {r.text}")
+        try:
+            body = r.text
+        except Exception:
+            body = "<no body>"
+        dlog(f"❌ Exchange failed response: {body}")
+        raise Exception("Token exchange failed")
 
-    return r.json().get("accessToken")
+    try:
+        data = r.json()
+    except Exception:
+        dlog("❌ Failed to parse JSON response")
+        raise Exception("Invalid JSON in token exchange response")
+
+    access_token = data.get("accessToken")
+
+    if not access_token:
+        dlog(f"❌ accessToken missing in response: {data}")
+        raise Exception("accessToken not found in exchange response")
+
+    safe_tok = f"{access_token[:6]}...{access_token[-4:]}"
+    dlog(f"✅ accessToken received: {safe_tok}")
+
+    return access_token
+
 
 
 def _check_token_validity(token: str) -> Dict[str, Any]:
@@ -220,18 +370,47 @@ def _check_token_validity(token: str) -> Dict[str, Any]:
 
 
 def auto_login(client: Dict[str, Any]):
+    """
+    Orchestrates full Dhan auto-login.
+    Logic unchanged – only debug logs added.
+    """
+    def dlog(msg):
+        print(f"[DHAN][AUTO] {msg}", flush=True)
+
+    uid = client.get("userid") or client.get("client_id")
+    dlog(f"Starting auto-login for userid={uid}")
+
     try:
+        # 1) Generate consent
+        dlog("STEP 1: generate consent")
         consent_id = _generate_consent(client)
-        token_id   = _browser_login(client, consent_id)
-        access     = _exchange_access_token(client, token_id)
+        dlog(f"Consent generated: {consent_id}")
 
-        if access:
-            _save_access_token(client, access)
-            return {"ok": True, "access_token": access}
+        # 2) Browser login (mobile → TOTP → PIN → redirect)
+        dlog("STEP 2: browser login")
+        token_id = _browser_login(client, consent_id)
+        dlog(f"Browser login complete, tokenId={token_id}")
 
-        return {"ok": False, "message": "Access token missing"}
+        # 3) Exchange tokenId → accessToken
+        dlog("STEP 3: exchange tokenId for accessToken")
+        access = _exchange_access_token(client, token_id)
+
+        if not access:
+            dlog("❌ Access token missing after exchange")
+            return {"ok": False, "message": "Access token missing"}
+
+        # 4) Save token
+        dlog("STEP 4: saving access token")
+        saved = _save_access_token(client, access)
+        dlog(f"Token save result={saved}")
+
+        dlog("✅ Auto-login SUCCESS")
+        return {"ok": True, "access_token": access}
+
     except Exception as e:
+        dlog(f"❌ Auto-login FAILED: {e}")
         return {"ok": False, "message": str(e)}
+
 
 
 def _norm_order_type(s: str) -> str:
@@ -305,29 +484,43 @@ def _parse_token_validity(ts: str):
 
 def login(client: Dict[str, Any]):
     """
-    Router calls this.
-    1. If stored token valid → return ok
-    2. Else → run auto-login()
+    Router entry-point for DHAN login.
+    Logic unchanged – only debug logs added.
     """
+    def dlog(msg):
+        print(f"[DHAN][LOGIN] {msg}", flush=True)
+
+    uid = client.get("userid") or client.get("client_id")
+    dlog(f"Login called for userid={uid}")
+
+    # Existing token (may be access_token or apikey fallback)
     token = client.get("access_token") or client.get("apikey")
 
-    # Check validity
     if token:
+        safe_tok = f"{token[:6]}...{token[-4:]}"
+        dlog(f"Found existing token={safe_tok}")
+        dlog("Checking token validity via /profile")
+
         res = _check_token_validity(token)
+        dlog(f"Token valid={res.get('ok')}")
+
         if res.get("ok"):
+            dlog("✅ Existing token is valid → login success")
             return {"ok": True, "access_token": token}
 
-    print(f"[DHAN] Token missing/expired → auto-login for {client.get('userid')}")
+        dlog("Existing token invalid/expired")
 
-    return auto_login(client)
+    else:
+        dlog("No existing token found")
 
+    # Fall back to auto-login
+    dlog("Triggering auto-login flow")
+    result = auto_login(client)
 
-    if auto.get("ok"):
-        # verify new token
-        client["access_token"] = auto["access_token"]
-        return _check_token_validity(auto["access_token"])
+    dlog(f"Auto-login result ok={result.get('ok')}")
 
-    return {"ok": False, "message": auto.get("message")}
+    return result
+
 
 
 
@@ -1029,6 +1222,7 @@ def modify_orders(orders: List[Dict[str, Any]]) -> Dict[str, Any]:
             messages.append(f"❌ {row.get('name','<unknown>')} ({row.get('order_id','?')}): {e}")
 
     return {"message": messages}
+
 
 
 
