@@ -89,10 +89,19 @@ from fastapi import APIRouter, Request
 router = APIRouter()
 
 @router.get("/dhan/callback")
-async def dhan_callback(code: str = None):
-    print("Dhan Redirect Callback Hit")
-    print("Received Code:", code)
-    return {"status": "OK", "message": "Callback received", "code": code}
+async def dhan_callback(tokenId: str = None):
+    print("✅ Dhan Redirect Callback Hit")
+    print("✅ Received tokenId:", tokenId)
+
+    if not tokenId:
+        return {"status": "error", "message": "tokenId missing"}
+
+    return {
+        "status": "OK",
+        "message": "Callback received",
+        "tokenId": tokenId
+    }
+
 
 @router.post("/dhan/postback")
 async def dhan_postback(request: Request):
@@ -2059,5 +2068,6 @@ def route_modify_order(payload: Dict[str, Any] = Body(...)):
 if __name__ == "__main__":
     import uvicorn
     uvicorn.run("MultiBroker_Router:app", host="127.0.0.1", port=5001, reload=False)
+
 
 
