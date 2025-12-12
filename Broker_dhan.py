@@ -308,8 +308,8 @@ def _exchange_access_token(client: dict, token_id: str) -> dict:
         "Content-Type": "application/json",
 
         # ✅ CRITICAL FIX
-        "client-id": api_key,
-        "access-token": api_key,
+        "app_id": api_key,
+        "app_secret": api_secret,
     }
 
     print(f"[DHAN][EXCHANGE] POST {url}", flush=True)
@@ -1177,6 +1177,7 @@ def modify_orders(orders: List[Dict[str, Any]]) -> Dict[str, Any]:
             messages.append(f"❌ {row.get('name','<unknown>')} ({row.get('order_id','?')}): {e}")
 
     return {"message": messages}
+
 
 
 
