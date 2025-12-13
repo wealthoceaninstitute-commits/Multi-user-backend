@@ -608,7 +608,7 @@ def get_positions() -> Dict[str, List[Dict[str, Any]]]:
     positions_data: Dict[str, List[Dict[str, Any]]] = {"open": [], "closed": []}
 
     for c in _read_clients():
-         token = (c.get("access_token") or "").strip()
+        token = (c.get("access_token") or "").strip()
         if not token:
             continue
         name = c.get("name") or c.get("display_name") or c.get("userid") or c.get("client_id") or ""
@@ -1192,6 +1192,7 @@ def modify_orders(orders: List[Dict[str, Any]]) -> Dict[str, Any]:
             messages.append(f"❌ {row.get('name','<unknown>')} ({row.get('order_id','?')}): {e}")
 
     return {"message": messages}
+
 
 
 
