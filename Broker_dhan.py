@@ -840,24 +840,18 @@ def get_holdings() -> Dict[str, Any]:
 # ---------------------------
 def place_orders(orders: List[Dict[str, Any]]) -> Dict[str, Any]:
     """
-    Place a batch of orders on Dhan.
-    Input  : list of normalized items from the router; each item should include:
-             client_id, action, ordertype, producttype, orderduration, exchange,
-             qty, price, triggerprice, disclosedquantity, amoorder, correlation_id,
-             security_id (Dhan), symboltoken (ignored), tag, symbol (label)
-    Output : {"status": "completed", "order_responses": { "<tag:client>": <dhan json> , ...}}
+    Place a batch of orders on Dhan using ACCESS TOKEN (v2).
     """
     if not isinstance(orders, list) or not orders:
         return {"status": "empty", "order_responses": {}}
 
-    # Build a quick lookup: dhan userid -> client json
+    # Build dhan userid -> client json map
     by_id: Dict[str, Dict[str, Any]] = {}
     for c in _read_clients():
         uid = str(c.get("userid") or c.get("client_id") or "").strip()
         if uid:
             by_id[uid] = c
 
-    # Dhan mappings
     EXCHANGE_MAP = {
         "NSE": "NSE_EQ",
         "BSE": "BSE_EQ",
@@ -869,6 +863,7 @@ def place_orders(orders: List[Dict[str, Any]]) -> Dict[str, Any]:
         "BSECD": "BSE_CURRENCY",
         "NCDEX": "NCDEX",
     }
+
     PRODUCT_MAP = {
         "INTRADAY": "INTRADAY",
         "MIS": "INTRADAY",
@@ -885,9 +880,9 @@ def place_orders(orders: List[Dict[str, Any]]) -> Dict[str, Any]:
     threads: List[threading.Thread] = []
 
     def _worker(od: Dict[str, Any]) -> None:
-        uid  = str(od.get("client_id") or "").strip()
-        tag  = od.get("tag") or ""
-        key  = f"{tag}:{uid}" if tag else uid
+        uid = str(od.get("client_id") or "").strip()
+        tag = od.get("tag") or ""
+        key = f"{tag}:{uid}" if tag else uid
         name = od.get("name") or uid
 
         cj = by_id.get(uid)
@@ -896,57 +891,53 @@ def place_orders(orders: List[Dict[str, Any]]) -> Dict[str, Any]:
                 responses[key] = {"status": "ERROR", "message": "Client JSON not found"}
             return
 
+        # ✅ ACCESS TOKEN ONLY (FIX)
         token = (cj.get("access_token") or "").strip()
         if not token:
             with lock:
-                responses[key] = {"status": "ERROR", "message": "Missing access token"}
+                responses[key] = {
+                    "status": "ERROR",
+                    "message": "Missing or expired access_token. Please re-login."
+                }
             return
 
-        # Gather/normalize fields
         exchange   = (od.get("exchange") or "NSE").upper()
         ordertype  = _norm_order_type(od.get("ordertype") or "")
         product_in = (od.get("producttype") or "").upper()
         validity   = (od.get("orderduration") or "DAY").upper()
 
-        security_id = str(od.get("security_id") or "").strip()  # REQUIRED
+        security_id = str(od.get("security_id") or "").strip()
         qty         = int(od.get("qty") or 0)
-        try:
-            price = float(od.get("price") or 0)
-        except Exception:
-            price = 0.0
-        try:
-            trig = float(od.get("triggerprice") or 0)
-        except Exception:
-            trig = 0.0
+        price       = float(od.get("price") or 0)
+        trig        = float(od.get("triggerprice") or 0)
         disc_qty    = int(od.get("disclosedquantity") or 0)
         is_amo      = (od.get("amoorder") or "N") == "Y"
         corr_id     = od.get("correlation_id") or f"ROUTER{uid[-4:].zfill(4)}"
 
-        # Validations to prevent DH-905
         if not security_id:
             with lock:
-                responses[key] = {"status": "ERROR", "message": "Missing securityId for Dhan"}
+                responses[key] = {"status": "ERROR", "message": "Missing securityId"}
             return
         if _needs_price(ordertype) and price <= 0:
             with lock:
-                responses[key] = {"status": "ERROR", "message": "Order requires price > 0"}
+                responses[key] = {"status": "ERROR", "message": "Price required"}
             return
         if _needs_trigger(ordertype) and trig <= 0:
             with lock:
-                responses[key] = {"status": "ERROR", "message": "Order requires triggerPrice > 0"}
+                responses[key] = {"status": "ERROR", "message": "Trigger price required"}
             return
 
-        data: Dict[str, Any] = {
+        data = {
             "dhanClientId": uid,
             "correlationId": corr_id,
             "transactionType": (od.get("action") or "").upper(),
             "exchangeSegment": EXCHANGE_MAP.get(exchange, exchange),
             "productType": PRODUCT_MAP.get(product_in, product_in),
-            "orderType": ordertype,                # already normalized
+            "orderType": ordertype,
             "validity": validity,
             "securityId": security_id,
             "quantity": qty,
-            "disclosedQuantity": disc_qty,         # always numeric
+            "disclosedQuantity": disc_qty,
             "price": price if _needs_price(ordertype) else 0,
             "triggerPrice": trig if _needs_trigger(ordertype) else 0,
             "afterMarketOrder": is_amo,
@@ -955,11 +946,8 @@ def place_orders(orders: List[Dict[str, Any]]) -> Dict[str, Any]:
             "boStopLossValue": 0,
         }
 
-        # --- DEBUG: print final payload & response ---
         try:
-            safe_token = f"{token[:6]}...{token[-4:]}" if token else ""
-            print(f"[DHAN] placing name={name} uid={uid} token={safe_token}")
-            print("[DHAN] payload =>")
+            print(f"[DHAN] placing {name} uid={uid}")
             print(json.dumps(data, indent=2))
         except Exception:
             pass
@@ -967,24 +955,16 @@ def place_orders(orders: List[Dict[str, Any]]) -> Dict[str, Any]:
         try:
             r = requests.post(
                 "https://api.dhan.co/v2/orders",
-                headers={"Content-Type": "application/json", "access-token": token},
+                headers={
+                    "Content-Type": "application/json",
+                    "access-token": token
+                },
                 json=data,
                 timeout=15,
             )
-            try:
-                resp = r.json()
-            except Exception:
-                resp = {"_raw": getattr(r, "text", "")}
+            resp = r.json()
         except Exception as e:
-            r = None
             resp = {"status": "ERROR", "message": str(e)}
-
-        try:
-            print(f"[DHAN] http_status={getattr(r, 'status_code', 'NA')}")
-            print("[DHAN] response =>")
-            print(json.dumps(resp, indent=2))
-        except Exception:
-            pass
 
         with lock:
             responses[key] = resp
@@ -993,6 +973,7 @@ def place_orders(orders: List[Dict[str, Any]]) -> Dict[str, Any]:
         t = threading.Thread(target=_worker, args=(item,))
         t.start()
         threads.append(t)
+
     for t in threads:
         t.join()
 
@@ -1179,6 +1160,7 @@ def modify_orders(orders: List[Dict[str, Any]]) -> Dict[str, Any]:
             messages.append(f"❌ {row.get('name','<unknown>')} ({row.get('order_id','?')}): {e}")
 
     return {"message": messages}
+
 
 
 
