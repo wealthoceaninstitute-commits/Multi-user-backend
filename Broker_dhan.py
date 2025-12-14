@@ -32,6 +32,30 @@ def _read_clients() -> List[Dict[str, Any]]:
         pass
     return items
 
+from datetime import datetime, timedelta
+
+def _is_token_expired(c: dict) -> bool:
+    """
+    Returns True if token is missing or older than allowed window.
+    Dhan tokens are short-lived, be conservative.
+    """
+    token = (c.get("access_token") or "").strip()
+    if not token:
+        return True
+
+    ts = c.get("last_token_check")
+    if not ts:
+        return True
+
+    try:
+        last = datetime.fromisoformat(ts.replace("Z", ""))
+    except Exception:
+        return True
+
+    # ⏱️ conservative window (example: 6 hours)
+    return datetime.utcnow() - last > timedelta(hours=6)
+
+
 #############################################
 # 🔥 DHAN AUTO LOGIN INTEGRATION
 #############################################
@@ -906,6 +930,10 @@ def place_orders(orders: List[Dict[str, Any]]) -> Dict[str, Any]:
             return
 
         # ✅ ACCESS TOKEN ONLY (FIX)
+        if _is_token_expired(cj):
+            print(f"[DHAN] token expired, re-login for {uid}", flush=True)
+            from Broker_dhan import auto_login
+            auto_login(cj) 
         token = (cj.get("access_token") or "").strip()
         if not token:
             with lock:
@@ -1174,6 +1202,7 @@ def modify_orders(orders: List[Dict[str, Any]]) -> Dict[str, Any]:
             messages.append(f"❌ {row.get('name','<unknown>')} ({row.get('order_id','?')}): {e}")
 
     return {"message": messages}
+
 
 
 
