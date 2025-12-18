@@ -112,7 +112,6 @@ recreate_sqlite_from_csv()
 BASE_DIR = os.path.abspath(os.environ.get("DATA_DIR", "./data"))
 CLIENTS_ROOT = os.path.join(BASE_DIR, "Multiuser_clients")
 MO_DIR       = os.path.join(CLIENTS_ROOT, "motilal")
-os.makedirs(DHAN_DIR, exist_ok=True)
 os.makedirs(MO_DIR,   exist_ok=True)
 
 app = FastAPI(title="Multi-broker Router")
@@ -1392,6 +1391,7 @@ async def disable_copy_setup(setup_id: str = Form(...)):
 if __name__ == "__main__":
     # Keep port 5001 to match your original app/open_browser behavior
     uvicorn.run(app, host="127.0.0.1", port=5001, reload=False, access_log=False)
+
 
 
 
