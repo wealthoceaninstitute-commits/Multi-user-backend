@@ -109,23 +109,26 @@ recreate_sqlite_from_csv()
 # =========================
 # App & Templates
 # =========================
-app = FastAPI(title="Copy Trading (FastAPI)", version="1.0")
+BASE_DIR = os.path.abspath(os.environ.get("DATA_DIR", "./data"))
+CLIENTS_ROOT = os.path.join(BASE_DIR, "Multiuser_clients")
+MO_DIR       = os.path.join(CLIENTS_ROOT, "motilal")
+os.makedirs(DHAN_DIR, exist_ok=True)
+os.makedirs(MO_DIR,   exist_ok=True)
 
-# CORS (customize as needed)
+app = FastAPI(title="Multi-broker Router")
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],  # tighten in prod
+    allow_origins=[
+        "https://multibrokertrader-production.up.railway.app",
+        "https://multibroker-trader.onrender.com",
+        "https://multibrokertrader-production-b4e2.up.railway.app",
+        "https://multibrokertradermultiuser-production-f735.up.railway.app",
+        "https://multi-user-bay.vercel.app"
+    ],
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
 )
-
-# Templates & static
-templates_dir = os.path.join(BASE_DIR, "templates")
-templates = Jinja2Templates(directory=templates_dir)
-static_dir = os.path.join(BASE_DIR, "static")
-if os.path.isdir(static_dir):
-    app.mount("/static", StaticFiles(directory=static_dir), name="static")
 
 # =========================
 # Helpers
@@ -1389,5 +1392,6 @@ async def disable_copy_setup(setup_id: str = Form(...)):
 if __name__ == "__main__":
     # Keep port 5001 to match your original app/open_browser behavior
     uvicorn.run(app, host="127.0.0.1", port=5001, reload=False, access_log=False)
+
 
 
