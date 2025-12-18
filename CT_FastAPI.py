@@ -26,7 +26,6 @@ import pyotp
 # === External modules expected to be present (same as your Flask app) ===
 from MOFSLOPENAPI import MOFSLOPENAPI
 from init_dirs import ensure_data_dirs
-from license_check import check_license
 
 # === FastAPI / Starlette imports ===
 from fastapi import FastAPI, Request, Body, Query, Form, HTTPException
@@ -46,9 +45,6 @@ CLIENTS_FOLDER = DIRS["CLIENTS_FOLDER"]
 GROUPS_FOLDER = DIRS["GROUPS_FOLDER"]
 COPYTRADING_FOLDER = DIRS["COPYTRADING_FOLDER"]
 
-if not check_license():
-    print("❌ License check failed. Exiting.")
-    sys.exit(1)
 
 position_meta = {}
 summary_data_global = {}
@@ -1294,3 +1290,4 @@ async def disable_copy_setup(setup_id: str = Form(...)):
 if __name__ == "__main__":
     # Keep port 5001 to match your original app/open_browser behavior
     uvicorn.run(app, host="127.0.0.1", port=5001, reload=False, access_log=False)
+
