@@ -37,6 +37,20 @@ import uvicorn
 import webbrowser
 
 # =========================
+# GitHub persistence helpers
+# =========================
+import base64
+
+GITHUB_TOKEN  = os.getenv("GITHUB_TOKEN")
+GITHUB_OWNER  = os.getenv("GITHUB_REPO_OWNER", "wealthoceaninstitute-commits")
+GITHUB_REPO   = os.getenv("GITHUB_REPO_NAME", "Multiuser_clients")
+GITHUB_BRANCH = os.getenv("GITHUB_BRANCH", "main")
+
+def github_write_file(rel_path: str, content: str):
+    ...
+
+
+# =========================
 # Setup & Globals
 # =========================
 DIRS = ensure_data_dirs()
@@ -533,51 +547,71 @@ def search_symbols(q: str = Query("", alias="q"), exchange: str = Query("", alia
     return JSONResponse(content={"results": results})
 
 @app.post("/add_client")
-async def add_client(background_tasks: BackgroundTasks, payload: dict = Body(...)):
-    data = payload
-    name = data.get('name')
-    userid = data.get('userid')
+async def add_client(
+    background_tasks: BackgroundTasks,
+    payload: dict = Body(...)
+):
+    name = (payload.get("name") or "").strip()
+    userid = (payload.get("userid") or "").strip()
+
     if not name or not userid:
         raise HTTPException(status_code=400, detail="Name and User ID required")
 
-    filename = f"{name.replace(' ', '_')}_{userid}.json"
+    safe_name = name.replace(" ", "_")
+    filename = f"{safe_name}_{userid}.json"
     filepath = os.path.join(CLIENTS_FOLDER, filename)
 
     try:
-        # save client file (same as before)
-        with open(filepath, 'w') as f:
-            json.dump(data, f, indent=4)
+        # 1️⃣ Save locally (runtime source of truth)
+        with open(filepath, "w", encoding="utf-8") as f:
+            json.dump(payload, f, indent=4)
 
-        # immediately kick off login for THIS client (non-blocking)
-        background_tasks.add_task(login_client, data)
+        # 2️⃣ Mirror to GitHub (persistence)
+        github_write_file(
+            rel_path=f"clients/{filename}",
+            content=json.dumps(payload, indent=4)
+        )
 
-        return {"success": True, "message": "Client saved. Login started in background."}
+        # 3️⃣ Background login (non-blocking)
+        background_tasks.add_task(login_client, payload)
+
+        return {
+            "success": True,
+            "message": "Client saved locally and synced to Git. Login started."
+        }
+
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
+
 
 
 @app.get("/get_clients")
 def get_clients():
     clients = []
+
     if not os.path.exists(CLIENTS_FOLDER):
         return {"clients": []}
-    try:
-        files = [f for f in os.listdir(CLIENTS_FOLDER) if f.endswith('.json')]
-        for fname in files:
-            try:
-                with open(os.path.join(CLIENTS_FOLDER, fname), 'r') as f:
-                    client = json.load(f)
-                    clients.append({
-                        'name': client.get('name', ''),
-                        'client_id': client.get('userid', ''),
-                        'capital': client.get('capital', ''),
-                        'session': 'Logged in' if client.get('session_active') else 'Logged out'
-                    })
-            except Exception:
-                continue
-    except Exception:
-        return {"clients": []}
+
+    for fname in os.listdir(CLIENTS_FOLDER):
+        if not fname.endswith(".json"):
+            continue
+
+        try:
+            with open(os.path.join(CLIENTS_FOLDER, fname), "r", encoding="utf-8") as f:
+                client = json.load(f)
+
+            clients.append({
+                "name": client.get("name", ""),
+                "client_id": client.get("userid", ""),
+                "capital": client.get("capital", ""),
+                "session": "Logged in" if client.get("session_active") else "Logged out"
+            })
+
+        except Exception:
+            continue
+
     return {"clients": clients}
+
 
 @app.post("/refresh_symbols")
 def refresh_symbols():
@@ -1090,48 +1124,67 @@ def get_summary():
 
 @app.post("/delete_client")
 async def delete_client(payload: dict = Body(...)):
-    data = payload
-    clients = data.get('clients', [])
+    clients = payload.get("clients", [])
     results = []
 
     for client in clients:
-        client_id = client.get('client_id')
-        name = client.get('name')
-        filename_prefix = f"{name.replace(' ', '_')}_{client_id}"
+        client_id = client.get("client_id")
+        name = client.get("name")
+
+        if not client_id or not name:
+            results.append("❌ Missing name or client_id")
+            continue
+
+        prefix = f"{name.replace(' ', '_')}_{client_id}"
         deleted = False
 
         for fname in os.listdir(CLIENTS_FOLDER):
-            if fname.startswith(filename_prefix) and fname.endswith('.json'):
+            if fname.startswith(prefix) and fname.endswith(".json"):
+                path = os.path.join(CLIENTS_FOLDER, fname)
                 try:
-                    os.remove(os.path.join(CLIENTS_FOLDER, fname))
+                    os.remove(path)
+                    github_delete_file(f"clients/{fname}")
                     results.append(f"✅ Deleted client: {name} ({client_id})")
                     deleted = True
                 except Exception as e:
-                    results.append(f"❌ Error deleting {name} ({client_id}): {str(e)}")
+                    results.append(f"❌ Error deleting {name}: {e}")
                 break
 
         if not deleted:
             results.append(f"⚠️ Not found: {name} ({client_id})")
-    return {'message': "\n".join(results)}
+
+    return {"message": "\n".join(results)}
 
 @app.post("/create_group")
 async def create_group(payload: dict = Body(...)):
-    data = payload
-    group_name = data.get('group_name')
-    clients = data.get('clients', [])
-    multiplier = data.get('multiplier', 1)
+    group_name = (payload.get("group_name") or "").strip()
+    clients = payload.get("clients", [])
+    multiplier = payload.get("multiplier", 1)
 
     if not group_name or not clients:
         raise HTTPException(status_code=400, detail="Group name and clients required")
 
-    os.makedirs(GROUPS_FOLDER, exist_ok=True)
-    filename = f"{group_name.replace(' ', '_')}.json"
+    safe_name = group_name.replace(" ", "_")
+    filename = f"{safe_name}.json"
     filepath = os.path.join(GROUPS_FOLDER, filename)
 
+    data = {
+        "group_name": group_name,
+        "clients": clients,
+        "multiplier": multiplier
+    }
+
     try:
-        with open(filepath, 'w') as f:
-            json.dump({'group_name': group_name, 'clients': clients, 'multiplier': multiplier}, f, indent=4)
-        return {'success': True, 'message': f'Group "{group_name}" created!'}
+        with open(filepath, "w", encoding="utf-8") as f:
+            json.dump(data, f, indent=4)
+
+        github_write_file(
+            f"groups/{filename}",
+            json.dumps(data, indent=4)
+        )
+
+        return {"success": True, "message": f'Group "{group_name}" created'}
+
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
@@ -1139,150 +1192,196 @@ async def create_group(payload: dict = Body(...)):
 def get_groups():
     groups = []
     client_id_to_name = {}
+
     for fname in os.listdir(CLIENTS_FOLDER):
-        if fname.endswith('.json'):
+        if fname.endswith(".json"):
             try:
-                with open(os.path.join(CLIENTS_FOLDER, fname), 'r') as f:
-                    cdata = json.load(f)
-                    client_id_to_name[cdata.get('userid')] = cdata.get('name')
+                with open(os.path.join(CLIENTS_FOLDER, fname), "r") as f:
+                    c = json.load(f)
+                    client_id_to_name[c.get("userid")] = c.get("name")
             except Exception:
                 continue
 
     if os.path.exists(GROUPS_FOLDER):
         for fname in os.listdir(GROUPS_FOLDER):
-            if fname.endswith('.json'):
+            if fname.endswith(".json"):
                 try:
-                    with open(os.path.join(GROUPS_FOLDER, fname), 'r') as f:
-                        group = json.load(f)
-                        client_ids = group.get('clients', [])
-                        client_names = [client_id_to_name.get(cid, cid) for cid in client_ids]
-                        groups.append({
-                            'group_name': group.get('group_name', ''),
-                            'no_of_clients': len(client_ids),
-                            'multiplier': group.get('multiplier', 1),
-                            'client_names': client_names,
-                        })
-                except Exception as e:
-                    print(f"Error loading group {fname}: {e}")
+                    with open(os.path.join(GROUPS_FOLDER, fname), "r") as f:
+                        g = json.load(f)
+
+                    client_ids = g.get("clients", [])
+                    groups.append({
+                        "group_name": g.get("group_name", ""),
+                        "no_of_clients": len(client_ids),
+                        "multiplier": g.get("multiplier", 1),
+                        "client_names": [
+                            client_id_to_name.get(cid, cid) for cid in client_ids
+                        ]
+                    })
+                except Exception:
+                    continue
+
     return {"groups": groups}
 
 @app.post("/delete_group")
 async def delete_group(payload: dict = Body(...)):
-    data = payload
-    groups = data.get('groups', [])
+    groups = payload.get("groups", [])
     results = []
+
     for group_name in groups:
         filename = f"{group_name.replace(' ', '_')}.json"
-        filepath = os.path.join(GROUPS_FOLDER, filename)
-        if os.path.exists(filepath):
-            try:
-                os.remove(filepath)
-                results.append(f"✅ Deleted group: {group_name}")
-            except Exception as e:
-                results.append(f"❌ Error deleting {group_name}: {str(e)}")
-        else:
-            results.append(f"⚠️ Not found: {group_name}")
-    return {'message': "\n".join(results)}
+        path = os.path.join(GROUPS_FOLDER, filename)
 
+        if not os.path.exists(path):
+            results.append(f"⚠️ Not found: {group_name}")
+            continue
+
+        try:
+            os.remove(path)
+            github_delete_file(f"groups/{filename}")
+            results.append(f"✅ Deleted group: {group_name}")
+        except Exception as e:
+            results.append(f"❌ Error deleting {group_name}: {e}")
+
+    return {"message": "\n".join(results)}
 @app.post("/save_copytrading_setup")
 async def save_copytrading_setup(payload: dict = Body(...)):
-    """
-    {
-      "name": "Setup Name",
-      "master": "clientid1",
-      "children": ["clientid2","clientid3"],
-      "multipliers": {"clientid2":2,"clientid3":1}
-    }
-    """
-    data = payload
-    name = (data.get("name") or "").strip()
-    master = data.get("master")
-    children = data.get("children", [])
-    multipliers = data.get("multipliers", {})
-    if not name:
-        raise HTTPException(status_code=400, detail="Setup name required.")
-    if not master or not children:
-        raise HTTPException(status_code=400, detail="Master and children required.")
+    name = (payload.get("name") or "").strip()
+    master = payload.get("master")
+    children = payload.get("children", [])
+    multipliers = payload.get("multipliers", {})
+
+    if not name or not master or not children:
+        raise HTTPException(status_code=400, detail="Name, master and children required")
 
     safe_name = "".join(c if c.isalnum() or c in "_-" else "_" for c in name)
-    child_part = "_".join(children)
-    dt_str = datetime.now().strftime("%Y%m%d_%H%M%S")
-    filename = f"{safe_name}_{master}_{child_part}_{dt_str}.json"
+    dt = datetime.now().strftime("%Y%m%d_%H%M%S")
+    filename = f"{safe_name}_{dt}.json"
     filepath = os.path.join(COPYTRADING_FOLDER, filename)
 
+    data = {
+        "name": name,
+        "master": master,
+        "children": children,
+        "multipliers": multipliers,
+        "enabled": payload.get("enabled", False)
+    }
+
     try:
-        with open(filepath, "w") as f:
+        with open(filepath, "w", encoding="utf-8") as f:
             json.dump(data, f, indent=4)
-        return {"success": True, "message": "Setup saved!", "file": filename}
+
+        github_write_file(
+            f"copytrading_setups/{filename}",
+            json.dumps(data, indent=4)
+        )
+
+        return {"success": True, "message": "Setup saved", "setup_id": filename[:-5]}
+
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
-
 @app.get("/list_copytrading_setups")
 def list_copytrading_setups():
     setups = []
-    folder = os.path.join(BASE_DIR, "copytrading_setups")
-    files = glob.glob(os.path.join(folder, "*.json"))
-    for filepath in files:
+
+    if not os.path.exists(COPYTRADING_FOLDER):
+        return {"setups": []}
+
+    for fname in os.listdir(COPYTRADING_FOLDER):
+        if not fname.endswith(".json"):
+            continue
+
         try:
-            with open(filepath, "r") as f:
-                setup = json.load(f)
-            setup_id = os.path.splitext(os.path.basename(filepath))[0]
+            with open(os.path.join(COPYTRADING_FOLDER, fname), "r") as f:
+                s = json.load(f)
+
             setups.append({
-                "setup_id": setup_id,
-                "name": setup.get("name", ""),
-                "master": setup.get("master", ""),
-                "children": setup.get("children", []),
-                "enabled": setup.get("enabled", False)
+                "setup_id": fname[:-5],
+                "name": s.get("name", ""),
+                "master": s.get("master", ""),
+                "children": s.get("children", []),
+                "enabled": s.get("enabled", False)
             })
         except Exception:
             continue
+
     return {"setups": setups}
 
 @app.post("/delete_copy_setup")
 async def delete_copy_setup(payload: dict = Body(...)):
-    data = payload
-    setup_id = data.get("setup_id")
+    setup_id = payload.get("setup_id")
     if not setup_id:
         raise HTTPException(status_code=400, detail="setup_id required")
 
-    folder = os.path.join(BASE_DIR, "copytrading_setups")
     filename = setup_id + ".json"
-    filepath = os.path.join(folder, filename)
+    filepath = os.path.join(COPYTRADING_FOLDER, filename)
+
     if not os.path.exists(filepath):
-        raise HTTPException(status_code=404, detail="Setup file not found")
+        raise HTTPException(status_code=404, detail="Setup not found")
+
     try:
         os.remove(filepath)
+        github_delete_file(f"copytrading_setups/{filename}")
         return {"success": True, "message": "Setup deleted"}
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
 @app.post("/enable_copy_setup")
 async def enable_copy_setup(setup_id: str = Form(...)):
-    folder = os.path.join(BASE_DIR, "copytrading_setups")
-    file_path = os.path.join(folder, f"{setup_id}.json")
+    filename = f"{setup_id}.json"
+    file_path = os.path.join(COPYTRADING_FOLDER, filename)
+
     if not os.path.exists(file_path):
         raise HTTPException(status_code=404, detail="Setup file not found.")
 
-    with open(file_path, "r") as f:
-        data = json.load(f)
-    data["enabled"] = True
-    with open(file_path, "w") as f:
-        json.dump(data, f, indent=4)
-    return {"success": True, "message": "Setup enabled."}
+    try:
+        with open(file_path, "r", encoding="utf-8") as f:
+            data = json.load(f)
+
+        data["enabled"] = True
+
+        with open(file_path, "w", encoding="utf-8") as f:
+            json.dump(data, f, indent=4)
+
+        # 🔁 mirror to GitHub
+        github_write_file(
+            f"copytrading_setups/{filename}",
+            json.dumps(data, indent=4)
+        )
+
+        return {"success": True, "message": "Setup enabled."}
+
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
 
 @app.post("/disable_copy_setup")
 async def disable_copy_setup(setup_id: str = Form(...)):
-    folder = os.path.join(BASE_DIR, "copytrading_setups")
-    file_path = os.path.join(folder, f"{setup_id}.json")
+    filename = f"{setup_id}.json"
+    file_path = os.path.join(COPYTRADING_FOLDER, filename)
+
     if not os.path.exists(file_path):
         raise HTTPException(status_code=404, detail="Setup file not found.")
 
-    with open(file_path, "r") as f:
-        data = json.load(f)
-    data["enabled"] = False
-    with open(file_path, "w") as f:
-        json.dump(data, f, indent=4)
-    return {"success": True, "message": "Setup disabled."}
+    try:
+        with open(file_path, "r", encoding="utf-8") as f:
+            data = json.load(f)
+
+        data["enabled"] = False
+
+        with open(file_path, "w", encoding="utf-8") as f:
+            json.dump(data, f, indent=4)
+
+        # 🔁 mirror to GitHub
+        github_write_file(
+            f"copytrading_setups/{filename}",
+            json.dumps(data, indent=4)
+        )
+
+        return {"success": True, "message": "Setup disabled."}
+
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
 
 # =========================
 # Main
@@ -1290,4 +1389,5 @@ async def disable_copy_setup(setup_id: str = Form(...)):
 if __name__ == "__main__":
     # Keep port 5001 to match your original app/open_browser behavior
     uvicorn.run(app, host="127.0.0.1", port=5001, reload=False, access_log=False)
+
 
